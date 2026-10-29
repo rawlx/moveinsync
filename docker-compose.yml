@@ -1,16 +1,25 @@
-# One-command local stack: docker compose up --build
+# Local development stack (one command): docker compose up --build
 # redis (single node, AOF everysec, noeviction) + 3 identical gateways + nginx load balancer on :8080.
+#
+# DEVELOPMENT ONLY: the gateways run with APP_AUTH_MODE=DEV, which accepts the well-known test tokens of
+# gateway/src/main/resources/dev/dev-fixtures.json. The application default is NONE (every connection rejected);
+# never deploy this file as is.
+#
+# Host ports: 8080 nginx (WebSocket /ws and actuator, load balanced), 8081-8083 the individual gateways (to place
+# clients on specific replicas in smoke and load tests), 16379 Redis (for the host-side event publisher harness).
 
 x-gateway: &gateway
   build: .
   image: trip-updates-gateway:local
   environment: &gateway-env
     APP_REDIS_URI: redis://redis:6379
+    APP_AUTH_MODE: DEV
   depends_on:
     redis:
       condition: service_healthy
   healthcheck:
-    test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health/liveness | grep -q UP"]
+    # Readiness includes the Redis health contributor: a gateway that cannot reach Redis is not ready.
+    test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health/readiness | grep -q '\"status\":\"UP\"'"]
     interval: 5s
     timeout: 3s
     retries: 20
@@ -30,6 +39,8 @@ services:
       - 512mb
       - --maxmemory-policy
       - noeviction
+    ports:
+      - "16379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -43,18 +54,24 @@ services:
     environment:
       <<: *gateway-env
       APP_NODE_ID: gateway-1
+    ports:
+      - "8081:8080"
 
   gateway-2:
     <<: *gateway
     environment:
       <<: *gateway-env
       APP_NODE_ID: gateway-2
+    ports:
+      - "8082:8080"
 
   gateway-3:
     <<: *gateway
     environment:
       <<: *gateway-env
       APP_NODE_ID: gateway-3
+    ports:
+      - "8083:8080"
 
   nginx:
     image: nginx:1.28.3-alpine

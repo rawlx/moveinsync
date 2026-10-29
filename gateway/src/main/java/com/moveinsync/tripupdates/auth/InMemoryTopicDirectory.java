@@ -23,6 +23,11 @@ public final class InMemoryTopicDirectory implements TopicDirectory {
         this.tenants = Map.copyOf(tenants);
     }
 
+    /** The data per tenant (immutable), e.g. to build a simulated fleet that matches this directory. */
+    public Map<String, Tenant> tenants() {
+        return tenants;
+    }
+
     @Override
     public Optional<Trip> trip(String tenantId, String tripId) {
         return tenant(tenantId).map(tenant -> tenant.trips().get(tripId));

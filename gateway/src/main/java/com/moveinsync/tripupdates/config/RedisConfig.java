@@ -19,4 +19,10 @@ class RedisConfig {
     EventStore eventStore(RedisClient redisClient, AppProperties properties) {
         return new RedisEventStore(redisClient, properties.retention());
     }
+
+    /** Health contributor {@code redis}, included in the readiness group (application.yml). */
+    @Bean(destroyMethod = "close")
+    RedisHealthIndicator redisHealthIndicator(RedisClient redisClient) {
+        return new RedisHealthIndicator(redisClient);
+    }
 }

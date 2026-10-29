@@ -3,6 +3,7 @@ package com.moveinsync.tripupdates.publish;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.moveinsync.tripupdates.auth.DevFixtures;
 import com.moveinsync.tripupdates.domain.SequencedEvent;
 import com.moveinsync.tripupdates.domain.StatusPayload;
 import com.moveinsync.tripupdates.domain.TenantTopic;
@@ -12,6 +13,8 @@ import com.moveinsync.tripupdates.domain.TripStatus;
 import com.moveinsync.tripupdates.notify.EventNotification;
 import com.moveinsync.tripupdates.notify.NotificationPublishException;
 import com.moveinsync.tripupdates.notify.NotificationPublisher;
+import com.moveinsync.tripupdates.routing.EventRouter;
+import com.moveinsync.tripupdates.routing.RoutingException;
 import com.moveinsync.tripupdates.store.AppendResult;
 import com.moveinsync.tripupdates.store.EventStore;
 import com.moveinsync.tripupdates.store.EventStoreUnavailableException;
@@ -46,6 +49,37 @@ class EventPublisherTest {
         assertThat(notifications.sent).containsExactly(EventNotification.of(outcome.appended()));
         assertThat(notifications.sent.get(0).topics()).extracting(EventNotification.TopicSeq::seq)
                 .containsExactlyElementsOf(outcome.appended().events().stream().map(SequencedEvent::seq).toList());
+    }
+
+    @Test
+    void routedPublishAppendsToTheDirectoryDestinationsInOneAppend() {
+        EventPublisher routed = new EventPublisher(store, notifications,
+                new EventRouter(DevFixtures.load("dev/dev-fixtures.json").directory()));
+
+        PublishOutcome outcome = routed.publish(status("e1"));
+
+        assertThat(store.appends).isEqualTo(1);
+        assertThat(outcome.appended().events()).extracting(SequencedEvent::topic)
+                .containsExactly(TopicId.trip("T-1"), TopicId.cab("C-1"), TopicId.office("O-1"));
+        assertThat(notifications.sent).containsExactly(EventNotification.of(outcome.appended()));
+    }
+
+    @Test
+    void unroutableEventIsRejectedBeforeAnythingIsWrittenOrNotified() {
+        EventPublisher routed = new EventPublisher(store, notifications,
+                new EventRouter(DevFixtures.load("dev/dev-fixtures.json").directory()));
+        TripEvent wrongCab = new TripEvent("e1", "acme", "T-1", "C-2", Instant.parse("2026-10-29T10:00:00Z"),
+                new StatusPayload(TripStatus.ARRIVED));
+
+        assertThatThrownBy(() -> routed.publish(wrongCab)).isInstanceOf(RoutingException.class);
+        assertThat(store.appends).isZero();
+        assertThat(notifications.attempts).isZero();
+    }
+
+    @Test
+    void routedPublishRequiresARouter() {
+        assertThatThrownBy(() -> publisher.publish(status("e1"))).isInstanceOf(IllegalStateException.class);
+        assertThat(store.appends).isZero();
     }
 
     @Test

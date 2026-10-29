@@ -1,6 +1,8 @@
 package com.moveinsync.tripupdates.config;
 
+import com.moveinsync.tripupdates.auth.TopicDirectory;
 import com.moveinsync.tripupdates.gateway.GatewayFanout;
+import com.moveinsync.tripupdates.routing.EventRouter;
 import com.moveinsync.tripupdates.gateway.SubscriptionRegistry;
 import com.moveinsync.tripupdates.notify.RedisNotificationPublisher;
 import com.moveinsync.tripupdates.notify.RedisNotificationSubscriber;
@@ -29,9 +31,14 @@ class FanoutConfig {
     }
 
     @Bean
+    EventRouter eventRouter(TopicDirectory topicDirectory) {
+        return new EventRouter(topicDirectory);
+    }
+
+    @Bean
     EventPublisher eventPublisher(EventStore eventStore, RedisNotificationPublisher notificationPublisher,
-            MeterRegistry meterRegistry) {
-        EventPublisher publisher = new EventPublisher(eventStore, notificationPublisher);
+            EventRouter eventRouter, MeterRegistry meterRegistry) {
+        EventPublisher publisher = new EventPublisher(eventStore, notificationPublisher, eventRouter);
         FunctionCounter.builder("tripupdates.notifications.publish.failures", publisher,
                         EventPublisher::notificationFailures)
                 .description("Notifications not published after a durable append (recovered by reconciliation)")

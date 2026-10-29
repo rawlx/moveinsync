@@ -322,6 +322,44 @@ class WebSocketEndpointIT {
     }
 
     @Test
+    void routedPublishReachesTripOfficeAndSecuritySubscribersOnly() throws Exception {
+        WsTestClient employee = WsTestClient.connect(port, "dev-acme-emp-1");
+        WsTestClient otherEmployee = WsTestClient.connect(port, "dev-acme-emp-2");
+        WsTestClient security = WsTestClient.connect(port, "dev-acme-security-o1");
+        employee.send(subscribe("m1", "trip:T-1"));
+        otherEmployee.send(subscribe("m2", "trip:T-2"));
+        security.send(subscribe("m3", "sos:O-1"));
+        for (WsTestClient client : List.of(employee, otherEmployee, security)) {
+            assertThat(client.next().get("type").asText()).isEqualTo("SUBSCRIBED");
+        }
+
+        // No topics supplied: the router derives trip:T-1, cab:C-1, office:O-1 and sos:O-1 from the directory.
+        publisher.publish(new TripEvent("e-" + IDS.incrementAndGet(), "acme", "T-1", "C-1", Instant.now(),
+                new StatusPayload(TripStatus.PICKED_UP)));
+        AppendResult sos = publisher.publish(new TripEvent("e-" + IDS.incrementAndGet(), "acme", "T-1", "C-1",
+                Instant.now(), new SosPayload("S-9", SosRaiser.EMPLOYEE, new GeoPoint(12.9, 77.6)))).appended();
+
+        assertThat(employee.next(2)).extracting(e -> e.at("/event/type").asText()).containsExactly("STATUS", "SOS");
+        JsonNode alert = security.next();
+        assertThat(alert.get("topic").asText()).isEqualTo("sos:O-1");
+        assertThat(alert.at("/event/eventId").asText()).isEqualTo(sos.events().get(0).event().eventId());
+        assertThat(security.poll(300)).as("security sees SOS only").isNull();
+        assertThat(otherEmployee.poll(300)).as("another trip's employee sees nothing").isNull();
+        employee.close();
+        otherEmployee.close();
+        security.close();
+    }
+
+    @Test
+    void readinessReportsRedisHealth() throws Exception {
+        HttpResponse<String> response = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/actuator/health/readiness")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).contains("\"status\":\"UP\"", "\"redis\":{\"status\":\"UP\"");
+    }
+
+    @Test
     void manyConcurrentClientsEachReceiveTheirTopicInOrder() throws Exception {
         List<WsTestClient> clients = new ArrayList<>();
         List<Thread> connectors = new ArrayList<>();

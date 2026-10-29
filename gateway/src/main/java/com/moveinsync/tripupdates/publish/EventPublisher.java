@@ -5,6 +5,8 @@ import com.moveinsync.tripupdates.domain.TripEvent;
 import com.moveinsync.tripupdates.notify.EventNotification;
 import com.moveinsync.tripupdates.notify.NotificationPublishException;
 import com.moveinsync.tripupdates.notify.NotificationPublisher;
+import com.moveinsync.tripupdates.routing.EventRouter;
+import com.moveinsync.tripupdates.routing.RoutingException;
 import com.moveinsync.tripupdates.store.AppendResult;
 import com.moveinsync.tripupdates.store.EventStore;
 import java.util.List;
@@ -22,11 +24,32 @@ public final class EventPublisher {
 
     private final EventStore store;
     private final NotificationPublisher notifications;
+    private final EventRouter router;
     private final AtomicLong notificationFailures = new AtomicLong();
 
+    /** A publisher for callers that supply destinations themselves ({@link #publish(TripEvent, List)} only). */
     public EventPublisher(EventStore store, NotificationPublisher notifications) {
+        this(store, notifications, null);
+    }
+
+    public EventPublisher(EventStore store, NotificationPublisher notifications, EventRouter router) {
         this.store = store;
         this.notifications = notifications;
+        this.router = router;
+    }
+
+    /**
+     * Routes the event from the directory ({@link EventRouter}) and publishes it to every destination in one atomic
+     * append. The normal entry point: destinations never come from the caller.
+     *
+     * @throws RoutingException if the directory does not confirm the event's trip, cab or office (nothing written)
+     * @throws IllegalStateException if this publisher was created without a router
+     */
+    public PublishOutcome publish(TripEvent event) {
+        if (router == null) {
+            throw new IllegalStateException("No event router configured");
+        }
+        return publish(event, router.route(event));
     }
 
     /**

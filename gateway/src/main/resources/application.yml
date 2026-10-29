@@ -18,6 +18,11 @@ management:
     health:
       probes:
         enabled: true
+      group:
+        # Ready only when the event store is reachable; liveness stays independent of Redis.
+        readiness:
+          include: readinessState,redis
+          show-components: always
   metrics:
     tags:
       node: ${app.node-id}
