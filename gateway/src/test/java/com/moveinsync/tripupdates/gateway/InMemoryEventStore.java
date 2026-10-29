@@ -23,9 +23,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * base, bounded log with floor, gap reporting, latest location per cab, idempotent ordered appends). The Redis
  * implementation itself is covered by {@code RedisEventStoreIT}.
  */
-final class InMemoryEventStore implements EventStore {
+public final class InMemoryEventStore implements EventStore {
 
-    static final long BASE = 1_000;
+    public static final long BASE = 1_000;
 
     private static final class TopicState {
         long seq = BASE;
@@ -40,20 +40,20 @@ final class InMemoryEventStore implements EventStore {
     private final AtomicInteger reads = new AtomicInteger();
     private volatile boolean failing;
 
-    InMemoryEventStore(int logMax) {
+    public InMemoryEventStore(int logMax) {
         this.logMax = logMax;
     }
 
-    void failing(boolean failing) {
+    public void failing(boolean failing) {
         this.failing = failing;
     }
 
     /** Number of readAfter / latestLocation calls. */
-    int reads() {
+    public int reads() {
         return reads.get();
     }
 
-    synchronized int appendCount() {
+    public synchronized int appendCount() {
         return appended.size();
     }
 

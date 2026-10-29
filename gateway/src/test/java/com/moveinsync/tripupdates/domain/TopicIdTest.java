@@ -15,6 +15,7 @@ class TopicIdTest {
         assertThat(TopicId.parse("trip:T-A1")).isEqualTo(TopicId.trip("T-A1"));
         assertThat(TopicId.parse("cab:C_17")).isEqualTo(TopicId.cab("C_17"));
         assertThat(TopicId.parse("office:O1")).isEqualTo(TopicId.office("O1"));
+        assertThat(TopicId.parse("sos:O1")).isEqualTo(TopicId.sos("O1"));
     }
 
     @Test

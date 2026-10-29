@@ -2,11 +2,16 @@ package com.moveinsync.tripupdates.domain;
 
 import java.util.Optional;
 
-/** The three topic families from the case study. The prefix is the client-visible, lower-case name part. */
+/**
+ * Topic families. TRIP, CAB and OFFICE are from the case study; SOS ({@code sos:{officeId}}) carries only the SOS
+ * alerts of one office, so security users can be authorised for alerts without seeing all office traffic.
+ * The prefix is the client-visible, lower-case name part.
+ */
 public enum TopicKind {
     TRIP("trip"),
     CAB("cab"),
-    OFFICE("office");
+    OFFICE("office"),
+    SOS("sos");
 
     private final String prefix;
 

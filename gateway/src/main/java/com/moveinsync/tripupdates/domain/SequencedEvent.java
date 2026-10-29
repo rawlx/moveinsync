@@ -29,8 +29,9 @@ public record SequencedEvent(TripEvent event, TopicId topic, long seq, Instant p
     }
 
     /**
-     * Checks that {@code event} may be delivered on {@code topic}: a trip topic must name the event's trip and a cab
-     * topic the event's cab. Used before sequencing so that an inconsistent append never reaches the store.
+     * Checks that {@code event} may be delivered on {@code topic}: a trip topic must name the event's trip, a cab
+     * topic the event's cab, and an SOS topic carries SOS events only. Used before sequencing so that an
+     * inconsistent append never reaches the store.
      */
     public static void requireDeliverableOn(TripEvent event, TopicId topic) {
         switch (topic.kind()) {
@@ -46,6 +47,11 @@ public record SequencedEvent(TripEvent event, TopicId topic, long seq, Instant p
             }
             case OFFICE -> {
                 // Office membership is resolved from the directory during routing.
+            }
+            case SOS -> {
+                if (event.type() != EventType.SOS) {
+                    throw new DomainValidationException("topic", "sos topic carries SOS events only");
+                }
             }
         }
     }

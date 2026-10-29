@@ -13,6 +13,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -72,24 +73,83 @@ public final class TopicFeed {
     }
 
     /**
-     * Adds a subscription that receives ordered events after the feed's current position. The first subscription
-     * initialises the position to the topic's head via {@link EventStore#openTopic}, which also creates the topic's
-     * sequence base if nothing was published yet, so the topic's creation is not mistaken for trimmed history.
+     * Attaches a subscription. Runs entirely under the feed lock, so no live delivery for this topic interleaves:
+     * <ol>
+     *   <li>The first attachment initialises the feed position to the topic's head via {@link EventStore#openTopic}
+     *       (which also creates the topic's sequence base, so its creation is not mistaken for trimmed history).</li>
+     *   <li>Without {@code resumeAfter} the subscription starts at the feed position (live only).</li>
+     *   <li>With {@code resumeAfter} below the feed position, the ordered events in between are read from the durable
+     *       stream and queued to this subscription only, in sequence order (replay).</li>
+     *   <li>With {@code resumeAfter} at or above the feed position, the position is validated against the store and
+     *       the subscription starts there; live events it has already processed are filtered by sequence.</li>
+     *   <li>{@code confirmation} (if any) is queued after the replayed events and before any live event, then the
+     *       latest location per cab is queued, then the subscription becomes live.</li>
+     * </ol>
+     * If the history needed for the replay is no longer retained, nothing is attached and
+     * {@link AttachOutcome.HistoryUnavailable} is returned. If it disappears in the middle of a replay (trimmed
+     * concurrently), the session has already received part of it and is closed with
+     * {@link CloseReason#RESYNC_REQUIRED}.
      *
-     * @return false if the feed was retired concurrently; the caller must use a fresh feed
+     * @return the outcome, or null if the feed was retired concurrently (the caller must use a fresh feed)
      */
-    boolean add(Subscription subscription) {
+    AttachOutcome attach(Subscription subscription, Long resumeAfter,
+            Function<AttachOutcome.Attached, OutboundFrame.ControlMessage> confirmation) {
         lock.lock();
         try {
             if (retired) {
-                return false;
+                return null;
             }
             if (cursor == UNINITIALIZED) {
                 cursor = store.openTopic(topic);
             }
-            subscription.startAfter(cursor);
+            long fromSeq = resumeAfter == null ? cursor : resumeAfter;
+            long toSeq = cursor;
+            int replayed = 0;
+            if (resumeAfter != null && resumeAfter < cursor) {
+                subscription.startAfter(resumeAfter);
+                long at = resumeAfter;
+                replay:
+                while (at < cursor) {
+                    TopicHistory history = store.readAfter(topic, at, pageSize);
+                    if (history.gap()) {
+                        if (replayed > 0) {
+                            subscription.resyncRequired();
+                        }
+                        return new AttachOutcome.HistoryUnavailable(resumeAfter, history.floorSeq(), history.headSeq());
+                    }
+                    for (SequencedEvent event : history.events()) {
+                        if (event.seq() > cursor) {
+                            break replay; // newer than the feed position: delivered live after attaching
+                        }
+                        subscription.deliver(event);
+                        replayed++;
+                        at = event.seq();
+                    }
+                    if (history.events().size() < pageSize) {
+                        break;
+                    }
+                }
+            } else if (resumeAfter != null) {
+                TopicHistory check = store.readAfter(topic, resumeAfter, 1);
+                if (check.gap()) {
+                    return new AttachOutcome.HistoryUnavailable(resumeAfter, check.floorSeq(), check.headSeq());
+                }
+                subscription.startAfter(resumeAfter);
+                toSeq = resumeAfter;
+            } else {
+                subscription.startAfter(cursor);
+            }
+            // Read before confirming: if the store fails here, nothing has been confirmed or attached.
+            List<SequencedEvent> latestLocations = store.latestLocations(topic);
+            AttachOutcome.Attached attached = new AttachOutcome.Attached(fromSeq, toSeq, replayed);
+            if (confirmation != null) {
+                subscription.session().offerControl(confirmation.apply(attached));
+            }
+            for (SequencedEvent location : latestLocations) {
+                subscription.deliver(location);
+            }
             subscriptions.add(subscription);
-            return true;
+            return attached;
         } finally {
             lock.unlock();
         }
@@ -122,7 +182,7 @@ public final class TopicFeed {
         }
     }
 
-    int subscriptionCount() {
+    public int subscriptionCount() {
         return subscriptions.size();
     }
 

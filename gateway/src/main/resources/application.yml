@@ -46,3 +46,10 @@ app:
   notifications:
     channel: notify:events
     reconcile-interval: 5s
+  auth:
+    # NONE rejects every WebSocket connection (fail closed). DEV accepts the well-known tokens of
+    # dev/dev-fixtures.json and must only be used for local runs and tests.
+    mode: ${APP_AUTH_MODE:NONE}
+  websocket:
+    max-message-chars: 4096
+    allowed-origin-patterns: []

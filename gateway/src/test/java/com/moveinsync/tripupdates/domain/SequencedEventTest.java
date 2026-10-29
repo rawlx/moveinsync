@@ -59,6 +59,14 @@ class SequencedEventTest {
                 .isInstanceOf(DomainValidationException.class);
     }
 
+    @Test
+    void sosTopicCarriesSosEventsOnly() {
+        assertThat(new SequencedEvent(event(EventType.SOS), TopicId.sos("O-A1"), 1, PUBLISHED).seq()).isEqualTo(1);
+        assertThatThrownBy(() -> new SequencedEvent(event(EventType.STATUS), TopicId.sos("O-A1"), 1, PUBLISHED))
+                .isInstanceOf(DomainValidationException.class)
+                .hasMessage("topic: sos topic carries SOS events only");
+    }
+
     @ParameterizedTest
     @ValueSource(longs = {0, -1, Long.MIN_VALUE})
     void rejectsNonPositiveSequence(long seq) {

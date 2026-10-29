@@ -18,7 +18,8 @@ import java.util.concurrent.locks.ReentrantLock;
  *       which is acceptable only because locations are latest-value data.</li>
  * </ul>
  * {@link #take()} always serves the reliable lane first, so an SOS (or status) never waits behind pending
- * locations, while reliable events keep their order among themselves.
+ * locations, while reliable events keep their order among themselves. Protocol control messages
+ * ({@link #offerControl}) share the reliable lane, so they stay ordered relative to reliable events.
  *
  * <p><b>Overflow policy for reliable events:</b> a reliable event is never dropped silently. When the reliable lane
  * is full, the outbox closes itself, discards everything still pending and returns {@link OfferResult#OVERFLOW};
@@ -47,7 +48,7 @@ public final class ClientOutbox {
     private final int locationCapacity;
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition notEmpty = lock.newCondition();
-    private final ArrayDeque<SequencedEvent> reliable;
+    private final ArrayDeque<OutboundFrame> reliable;
     private final LinkedHashMap<LocationKey, SequencedEvent> locations = new LinkedHashMap<>();
     private boolean closed;
     private long conflated;
@@ -74,7 +75,7 @@ public final class ClientOutbox {
                     closeLocked();
                     return OfferResult.OVERFLOW;
                 }
-                reliable.addLast(event);
+                reliable.addLast(new OutboundFrame.EventFrame(event));
                 notEmpty.signal();
                 return OfferResult.QUEUED;
             }
@@ -104,12 +105,31 @@ public final class ClientOutbox {
         }
     }
 
+    /** Queues a protocol control message in the reliable lane. Never blocks; same overflow policy as events. */
+    public OfferResult offerControl(OutboundFrame.ControlMessage message) {
+        lock.lock();
+        try {
+            if (closed) {
+                return OfferResult.CLOSED;
+            }
+            if (reliable.size() >= reliableCapacity) {
+                closeLocked();
+                return OfferResult.OVERFLOW;
+            }
+            reliable.addLast(new OutboundFrame.ControlFrame(message));
+            notEmpty.signal();
+            return OfferResult.QUEUED;
+        } finally {
+            lock.unlock();
+        }
+    }
+
     /**
-     * Next event to send, reliable lane first; blocks while both lanes are empty.
+     * Next frame to send, reliable lane first; blocks while both lanes are empty.
      *
-     * @return the next event, or null once the outbox is closed (pending events are then discarded)
+     * @return the next frame, or null once the outbox is closed (pending frames are then discarded)
      */
-    public SequencedEvent take() throws InterruptedException {
+    public OutboundFrame take() throws InterruptedException {
         lock.lock();
         try {
             while (!closed && reliable.isEmpty() && locations.isEmpty()) {
@@ -124,7 +144,7 @@ public final class ClientOutbox {
             Iterator<SequencedEvent> oldest = locations.values().iterator();
             SequencedEvent next = oldest.next();
             oldest.remove();
-            return next;
+            return new OutboundFrame.EventFrame(next);
         } finally {
             lock.unlock();
         }

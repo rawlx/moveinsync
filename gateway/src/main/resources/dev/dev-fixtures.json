@@ -1,0 +1,28 @@
+{
+  "_comment": "DEVELOPMENT AND TEST ONLY - loaded only when app.auth.mode=dev. Tokens are well-known test strings, not credentials. Ids only, no personal data.",
+  "tokens": {
+    "dev-acme-emp-1": {"subject": "emp-1", "tenant": "acme", "role": "EMPLOYEE"},
+    "dev-acme-emp-2": {"subject": "emp-2", "tenant": "acme", "role": "EMPLOYEE"},
+    "dev-acme-admin-o1": {"subject": "admin-o1", "tenant": "acme", "role": "OFFICE_ADMIN", "offices": ["O-1"]},
+    "dev-acme-security-o1": {"subject": "security-o1", "tenant": "acme", "role": "SECURITY", "grants": ["sos:O-1"]},
+    "dev-globex-emp-1": {"subject": "g-emp-1", "tenant": "globex", "role": "EMPLOYEE"},
+    "dev-globex-admin-o1": {"subject": "g-admin-o1", "tenant": "globex", "role": "OFFICE_ADMIN", "offices": ["O-1"]}
+  },
+  "tenants": {
+    "acme": {
+      "offices": ["O-1", "O-2"],
+      "cabs": {"C-1": {"office": "O-1"}, "C-2": {"office": "O-2"}},
+      "trips": {
+        "T-1": {"office": "O-1", "cab": "C-1", "passengers": ["emp-1"]},
+        "T-2": {"office": "O-2", "cab": "C-2", "passengers": ["emp-2"]}
+      }
+    },
+    "globex": {
+      "offices": ["O-1"],
+      "cabs": {"C-1": {"office": "O-1"}},
+      "trips": {
+        "T-1": {"office": "O-1", "cab": "C-1", "passengers": ["g-emp-1"]}
+      }
+    }
+  }
+}

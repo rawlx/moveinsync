@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.function.Function;
 
 /**
  * This gateway's local subscriptions, indexed by tenant-scoped topic. Thread-safe.
@@ -52,6 +53,25 @@ public final class SubscriptionRegistry {
      * @throws com.moveinsync.tripupdates.store.EventStoreException if the topic position cannot be read
      */
     public Subscription subscribe(ClientSession session, TopicId topic) {
+        AttachOutcome outcome = attach(session, topic, null, Integer.MAX_VALUE, null);
+        if (outcome instanceof AttachOutcome.HistoryUnavailable unavailable) {
+            throw new IllegalStateException("Unexpected history gap at feed position " + unavailable.requestedSeq());
+        }
+        return subscription(session, topic);
+    }
+
+    /**
+     * Attaches a subscription of the session's own tenant (see {@link TopicFeed#attach} for ordering guarantees).
+     * The topic key is built from the session's tenant, never from client input. Authorization must have been
+     * checked by the caller.
+     *
+     * @param resumeAfter  null for live-only; otherwise the last sequence the client processed
+     * @param confirmation control message queued after the replay and before live events (may be null)
+     * @throws IllegalStateException if the session is closed
+     * @throws com.moveinsync.tripupdates.store.EventStoreException if the store cannot be read (nothing attached)
+     */
+    public AttachOutcome attach(ClientSession session, TopicId topic, Long resumeAfter, int maxSubscriptions,
+            Function<AttachOutcome.Attached, OutboundFrame.ControlMessage> confirmation) {
         TenantTopic key = new TenantTopic(session.tenantId(), topic);
         Map<TopicId, Subscription> mine = bySession.computeIfAbsent(session, s -> new ConcurrentHashMap<>());
         synchronized (mine) {
@@ -59,30 +79,42 @@ public final class SubscriptionRegistry {
                 bySession.remove(session, mine);
                 throw new IllegalStateException("Session " + session.id() + " is closed");
             }
-            Subscription existing = mine.get(topic);
-            if (existing != null) {
-                return existing;
+            if (mine.containsKey(topic)) {
+                return new AttachOutcome.AlreadySubscribed();
+            }
+            if (mine.size() >= maxSubscriptions) {
+                return new AttachOutcome.LimitReached(maxSubscriptions);
             }
             Subscription subscription = new Subscription(session, key);
             while (true) {
                 TopicFeed feed = feeds.computeIfAbsent(key, k -> new TopicFeed(k, store, pageSize, feedExecutor));
-                boolean added;
+                AttachOutcome outcome;
                 try {
-                    added = feed.add(subscription);
+                    outcome = feed.attach(subscription, resumeAfter, confirmation);
                 } catch (RuntimeException e) {
                     if (feed.retireIfEmpty()) {
                         feeds.remove(key, feed);
                     }
                     throw e;
                 }
-                if (added) {
-                    break;
+                if (outcome == null) {
+                    feeds.remove(key, feed); // retired concurrently; retry with a fresh feed
+                    continue;
                 }
-                feeds.remove(key, feed); // retired concurrently; retry with a fresh feed
+                if (outcome instanceof AttachOutcome.Attached) {
+                    mine.put(topic, subscription);
+                } else if (feed.retireIfEmpty()) {
+                    feeds.remove(key, feed);
+                }
+                return outcome;
             }
-            mine.put(topic, subscription);
-            return subscription;
         }
+    }
+
+    /** The session's subscription to a topic, or null. */
+    public Subscription subscription(ClientSession session, TopicId topic) {
+        Map<TopicId, Subscription> mine = bySession.get(session);
+        return mine == null ? null : mine.get(topic);
     }
 
     /** @return true if the session was subscribed to the topic */

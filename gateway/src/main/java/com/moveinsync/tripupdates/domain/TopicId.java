@@ -27,6 +27,11 @@ public record TopicId(TopicKind kind, String id) {
         return new TopicId(TopicKind.OFFICE, officeId);
     }
 
+    /** SOS alerts of one office. */
+    public static TopicId sos(String officeId) {
+        return new TopicId(TopicKind.SOS, officeId);
+    }
+
     /** Parses {@code kind:id}; the kind must be one of the lower-case prefixes and the id a valid identifier. */
     public static TopicId parse(String name) {
         if (name == null) {

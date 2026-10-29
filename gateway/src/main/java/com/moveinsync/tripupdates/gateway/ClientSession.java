@@ -64,9 +64,17 @@ public final class ClientSession {
         }
     }
 
+    /** Queues a protocol control message in order with reliable events. Same overflow policy as events. */
+    public void offerControl(OutboundFrame.ControlMessage message) {
+        if (outbox.offerControl(message) == ClientOutbox.OfferResult.OVERFLOW) {
+            close(CloseReason.SLOW_CONSUMER);
+        }
+    }
+
     /**
-     * Closes the session once (later calls are ignored). Closing the transport and unregistering subscriptions run
-     * on a separate virtual thread: the caller may hold a feed lock, and the transport may be slow to close.
+     * Closes the session once (later calls are ignored). Unregistering subscriptions and closing the transport run on
+     * a separate virtual thread: the caller may hold a feed lock, and closing a transport whose writer is blocked on a
+     * frozen client can itself block. Subscriptions are unregistered first so no feed keeps delivering to it.
      */
     public void close(CloseReason reason) {
         if (!closeReason.compareAndSet(null, reason)) {
@@ -75,18 +83,20 @@ public final class ClientSession {
         outbox.close();
         Thread.ofVirtual().name("client-close-" + id).start(() -> {
             try {
-                transport.close(reason);
-            } catch (RuntimeException e) {
-                log.debug("Closing transport of session {} failed", id, e);
-            } finally {
                 onClosed.accept(this);
+            } finally {
+                try {
+                    transport.close(reason);
+                } catch (RuntimeException e) {
+                    log.debug("Closing transport of session {} failed", id, e);
+                }
             }
         });
     }
 
     private void writeLoop() {
         try {
-            SequencedEvent next;
+            OutboundFrame next;
             while ((next = outbox.take()) != null) {
                 transport.send(next);
             }

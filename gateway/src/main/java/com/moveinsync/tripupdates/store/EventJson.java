@@ -21,13 +21,23 @@ import java.time.format.DateTimeParseException;
 /**
  * JSON form of a {@link TripEvent} as stored in Redis:
  * {@code {"eventId","tenantId","type","tripId"?,"cabId","occurredAt","data":{...}}} with flat {@code lat}/{@code lon}
- * in {@code data}. Decoding goes through the domain constructors, so stored data is re-validated.
+ * in {@code data}. Decoding goes through the domain constructors, so stored data is re-validated. The same object is
+ * embedded in WebSocket {@code EVENT} frames, so clients see exactly the stored form.
  */
-final class EventJson {
+public final class EventJson {
 
     private final ObjectMapper mapper = new ObjectMapper();
 
     String encode(TripEvent event) {
+        try {
+            return mapper.writeValueAsString(toTree(event));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Event could not be serialized", e);
+        }
+    }
+
+    /** The event as a JSON tree (for embedding in other messages). */
+    public ObjectNode toTree(TripEvent event) {
         ObjectNode node = mapper.createObjectNode();
         node.put("eventId", event.eventId());
         node.put("tenantId", event.tenantId());
@@ -61,11 +71,7 @@ final class EventJson {
                 data.put("lon", sos.position().lon());
             }
         }
-        try {
-            return mapper.writeValueAsString(node);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Event could not be serialized", e);
-        }
+        return node;
     }
 
     TripEvent decode(String json) {

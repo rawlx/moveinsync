@@ -5,10 +5,10 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Semaphore;
 
-/** Records sent events. A gated transport blocks every send until permits are released (a slow or frozen client). */
-final class RecordingTransport implements ClientTransport {
+/** Records sent frames. A gated transport blocks every send until permits are released (a slow or frozen client). */
+public final class RecordingTransport implements ClientTransport {
 
-    private final List<SequencedEvent> sent = new CopyOnWriteArrayList<>();
+    private final List<OutboundFrame> frames = new CopyOnWriteArrayList<>();
     private final Semaphore gate;
     private volatile CloseReason closeReason;
 
@@ -16,23 +16,23 @@ final class RecordingTransport implements ClientTransport {
         this.gate = gate;
     }
 
-    static RecordingTransport open() {
+    public static RecordingTransport open() {
         return new RecordingTransport(null);
     }
 
-    static RecordingTransport gated() {
+    public static RecordingTransport gated() {
         return new RecordingTransport(new Semaphore(0));
     }
 
     @Override
-    public void send(SequencedEvent event) throws Exception {
+    public void send(OutboundFrame frame) throws Exception {
         if (gate != null) {
             gate.acquire();
         }
         if (closeReason != null) {
             throw new IllegalStateException("closed");
         }
-        sent.add(event);
+        frames.add(frame);
     }
 
     @Override
@@ -43,23 +43,40 @@ final class RecordingTransport implements ClientTransport {
         }
     }
 
-    void release(int sends) {
+    public void release(int sends) {
         gate.release(sends);
     }
 
-    List<SequencedEvent> sent() {
-        return List.copyOf(sent);
+    /** Every frame sent, in order. */
+    public List<OutboundFrame> frames() {
+        return List.copyOf(frames);
     }
 
-    List<Long> seqs() {
-        return sent.stream().map(SequencedEvent::seq).toList();
+    /** Control messages sent, in order. */
+    public List<OutboundFrame.ControlMessage> controls() {
+        return frames.stream()
+                .filter(OutboundFrame.ControlFrame.class::isInstance)
+                .map(frame -> ((OutboundFrame.ControlFrame) frame).message())
+                .toList();
     }
 
-    List<String> eventIds() {
-        return sent.stream().map(e -> e.event().eventId()).toList();
+    /** Events sent, in order. */
+    public List<SequencedEvent> sent() {
+        return frames.stream()
+                .filter(OutboundFrame.EventFrame.class::isInstance)
+                .map(frame -> ((OutboundFrame.EventFrame) frame).event())
+                .toList();
     }
 
-    CloseReason closeReason() {
+    public List<Long> seqs() {
+        return sent().stream().map(SequencedEvent::seq).toList();
+    }
+
+    public List<String> eventIds() {
+        return sent().stream().map(e -> e.event().eventId()).toList();
+    }
+
+    public CloseReason closeReason() {
         return closeReason;
     }
 }

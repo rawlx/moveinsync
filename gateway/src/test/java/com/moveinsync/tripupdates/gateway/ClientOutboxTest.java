@@ -81,6 +81,26 @@ class ClientOutboxTest {
     }
 
     @Test
+    void controlMessagesShareTheReliableLaneInOrderAndCountTowardsItsCapacity() throws InterruptedException {
+        OutboundFrame.ControlMessage confirmed = new OutboundFrame.ControlMessage() { };
+        outbox.offer(sequenced(location("l1", "C-1", 1), OFFICE, 1));
+        outbox.offer(sequenced(status("e1"), TRIP, 2));
+        assertThat(outbox.offerControl(confirmed)).isEqualTo(OfferResult.QUEUED);
+        outbox.offer(sequenced(status("e2"), TRIP, 3));
+
+        assertThat(outbox.take()).isEqualTo(new OutboundFrame.EventFrame(sequenced(status("e1"), TRIP, 2)));
+        assertThat(outbox.take()).isEqualTo(new OutboundFrame.ControlFrame(confirmed));
+        assertThat(event(outbox.take()).event().eventId()).isEqualTo("e2");
+        assertThat(event(outbox.take()).event().eventId()).isEqualTo("l1");
+
+        for (int i = 0; i < 4; i++) {
+            outbox.offerControl(confirmed);
+        }
+        assertThat(outbox.offerControl(confirmed)).isEqualTo(OfferResult.OVERFLOW);
+        assertThat(outbox.isClosed()).isTrue();
+    }
+
+    @Test
     void reliableOverflowClosesTheOutboxInsteadOfDroppingSilently() throws InterruptedException {
         for (int i = 1; i <= 4; i++) {
             outbox.offer(sequenced(status("e" + i), TRIP, i));
@@ -110,9 +130,9 @@ class ClientOutboxTest {
         List<SequencedEvent> got = new ArrayList<>();
         Thread consumer = Thread.ofVirtual().start(() -> {
             try {
-                got.add(outbox.take());
+                got.add(event(outbox.take()));
                 taken.countDown();
-                got.add(outbox.take());
+                got.add(event(outbox.take()));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
@@ -144,7 +164,7 @@ class ClientOutboxTest {
         }
         Map<TopicId, Long> last = new HashMap<>();
         for (int i = 0; i < producers * perProducer; i++) {
-            SequencedEvent next = big.take();
+            SequencedEvent next = event(big.take());
             Long previous = last.put(next.topic(), next.seq());
             assertThat(next.seq()).isEqualTo(previous == null ? 1 : previous + 1);
         }
@@ -154,10 +174,14 @@ class ClientOutboxTest {
         assertThat(last.values()).containsOnly((long) perProducer);
     }
 
+    private static SequencedEvent event(OutboundFrame frame) {
+        return frame == null ? null : ((OutboundFrame.EventFrame) frame).event();
+    }
+
     private List<SequencedEvent> drain(int count) throws InterruptedException {
         List<SequencedEvent> out = new ArrayList<>();
         for (int i = 0; i < count; i++) {
-            out.add(outbox.take());
+            out.add(event(outbox.take()));
         }
         assertThat(outbox.reliableDepth() + outbox.locationDepth()).isZero();
         return out;

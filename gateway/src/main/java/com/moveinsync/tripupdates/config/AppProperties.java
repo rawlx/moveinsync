@@ -5,6 +5,7 @@ import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import java.time.Duration;
+import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
@@ -18,7 +19,25 @@ public record AppProperties(
         @Valid @NotNull Redis redis,
         @Valid @NotNull Outbox outbox,
         @Valid @NotNull Retention retention,
-        @Valid @NotNull Notifications notifications) {
+        @Valid @NotNull Notifications notifications,
+        @Valid @NotNull Auth auth,
+        @Valid @NotNull WebSocket websocket) {
+
+    /** {@code NONE}: no identity provider, every connection is rejected. {@code DEV}: test tokens only. */
+    public enum AuthMode {
+        NONE,
+        DEV
+    }
+
+    public record Auth(@NotNull AuthMode mode) {
+    }
+
+    /**
+     * @param maxMessageChars       longest accepted client frame
+     * @param allowedOriginPatterns browser origins allowed to connect; empty means same-origin only
+     */
+    public record WebSocket(@Min(256) int maxMessageChars, @NotNull List<String> allowedOriginPatterns) {
+    }
 
     /** {@code commandTimeout} bounds every Redis command; a timed-out append has an unknown outcome. */
     public record Redis(@NotBlank String uri, @NotNull Duration commandTimeout) {
