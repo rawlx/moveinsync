@@ -47,6 +47,7 @@ public final class TopicFeed {
     private final EventStore store;
     private final int pageSize;
     private final Executor executor;
+    private final GatewayMetrics metrics;
 
     /** Serialises reads from the store and deliveries for this topic. */
     private final ReentrantLock lock = new ReentrantLock();
@@ -61,11 +62,12 @@ public final class TopicFeed {
     private final Map<String, Long> pendingLocationSeqByCab = new HashMap<>(); // guarded by pendingLock
     private final AtomicBoolean scheduled = new AtomicBoolean();
 
-    TopicFeed(TenantTopic topic, EventStore store, int pageSize, Executor executor) {
+    TopicFeed(TenantTopic topic, EventStore store, int pageSize, Executor executor, GatewayMetrics metrics) {
         this.topic = topic;
         this.store = store;
         this.pageSize = pageSize;
         this.executor = executor;
+        this.metrics = metrics;
     }
 
     public TenantTopic topic() {
@@ -230,6 +232,7 @@ public final class TopicFeed {
             } catch (RuntimeException e) {
                 // Store unavailable or invalid data. Ordered events are not lost: the cursor did not move past
                 // them, and the next reconciliation retries. Pending locations are dropped (latest-value data).
+                metrics.feedReadFailed();
                 log.warn("Feed {} could not read from the event store; will retry on next reconciliation", topic, e);
                 synchronized (pendingLock) {
                     catchUpRequested = true;
@@ -272,6 +275,7 @@ public final class TopicFeed {
             if (history.gap()) {
                 log.warn("Feed {} lost history after seq {} (floor {}, head {}); resyncing {} subscriptions",
                         topic, cursor, history.floorSeq(), history.headSeq(), subscriptions.size());
+                metrics.feedResynced();
                 subscriptions.forEach(Subscription::resyncRequired);
                 cursor = history.headSeq();
                 return;

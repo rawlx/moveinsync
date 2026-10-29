@@ -6,6 +6,7 @@ import com.moveinsync.tripupdates.store.EventStore;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.function.Function;
@@ -25,22 +26,32 @@ public final class SubscriptionRegistry {
     private final Executor feedExecutor;
     private final int reliableCapacity;
     private final int locationCapacity;
+    private final GatewayMetrics metrics;
     private final ConcurrentHashMap<TenantTopic, TopicFeed> feeds = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<ClientSession, Map<TopicId, Subscription>> bySession = new ConcurrentHashMap<>();
+    private final Set<ClientSession> sessions = ConcurrentHashMap.newKeySet();
 
     public SubscriptionRegistry(EventStore store, int pageSize, Executor feedExecutor, int reliableCapacity,
             int locationCapacity) {
+        this(store, pageSize, feedExecutor, reliableCapacity, locationCapacity, GatewayMetrics.NOOP);
+    }
+
+    public SubscriptionRegistry(EventStore store, int pageSize, Executor feedExecutor, int reliableCapacity,
+            int locationCapacity, GatewayMetrics metrics) {
         this.store = store;
         this.pageSize = pageSize;
         this.feedExecutor = feedExecutor;
         this.reliableCapacity = reliableCapacity;
         this.locationCapacity = locationCapacity;
+        this.metrics = metrics;
     }
 
     /** Opens a session for an authenticated client of {@code tenantId} and starts its writer. */
     public ClientSession open(String sessionId, String tenantId, ClientTransport transport) {
         ClientSession session = new ClientSession(sessionId, tenantId,
-                new ClientOutbox(reliableCapacity, locationCapacity), transport, this::removeAll);
+                new ClientOutbox(reliableCapacity, locationCapacity), transport, this::removeAll, metrics);
+        sessions.add(session);
+        metrics.sessionOpened();
         session.startWriter();
         return session;
     }
@@ -87,7 +98,8 @@ public final class SubscriptionRegistry {
             }
             Subscription subscription = new Subscription(session, key);
             while (true) {
-                TopicFeed feed = feeds.computeIfAbsent(key, k -> new TopicFeed(k, store, pageSize, feedExecutor));
+                TopicFeed feed = feeds.computeIfAbsent(key,
+                        k -> new TopicFeed(k, store, pageSize, feedExecutor, metrics));
                 AttachOutcome outcome;
                 try {
                     outcome = feed.attach(subscription, resumeAfter, confirmation);
@@ -117,7 +129,13 @@ public final class SubscriptionRegistry {
         return mine == null ? null : mine.get(topic);
     }
 
-    /** @return true if the session was subscribed to the topic */
+    /**
+     * Removes the subscription and every event of that topic still pending in the session's queue (including
+     * pending locations), so nothing of the topic is sent after the caller's {@code UNSUBSCRIBED}. Detaching takes the
+     * feed lock, so no delivery of the topic can be in flight once the purge runs.
+     *
+     * @return true if the session was subscribed to the topic
+     */
     public boolean unsubscribe(ClientSession session, TopicId topic) {
         Map<TopicId, Subscription> mine = bySession.get(session);
         if (mine == null) {
@@ -129,12 +147,14 @@ public final class SubscriptionRegistry {
                 return false;
             }
             detach(subscription);
+            session.outbox().discardTopic(topic);
             return true;
         }
     }
 
     /** Removes every subscription of the session (called when it closes). */
     public void removeAll(ClientSession session) {
+        sessions.remove(session);
         Map<TopicId, Subscription> mine = bySession.remove(session);
         if (mine == null) {
             return;
@@ -152,6 +172,11 @@ public final class SubscriptionRegistry {
 
     public Collection<TopicFeed> feeds() {
         return List.copyOf(feeds.values());
+    }
+
+    /** Open sessions of this gateway. */
+    public Collection<ClientSession> sessions() {
+        return List.copyOf(sessions);
     }
 
     public List<TopicId> topicsOf(ClientSession session) {

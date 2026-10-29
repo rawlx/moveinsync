@@ -287,6 +287,34 @@ class GatewayFanoutTest {
     }
 
     @Test
+    void unsubscribePurgesPendingEventsAndLocationsOfThatTopicOnly() {
+        RecordingTransport desk = RecordingTransport.gated();
+        ClientSession session = registry.open("desk", "acme", desk);
+        registry.subscribe(session, OFFICE);
+        registry.subscribe(session, TRIP);
+
+        // The writer takes one copy of warm-up (trip or office: the two feeds drain independently) and blocks.
+        publish(status("warm-up"), ALL);
+        publish(status("e2"), ALL);
+        publish(location("l1", "C-1", 1.0), List.of(CAB, OFFICE));
+        await().atMost(WAIT).until(() -> session.outbox().reliableDepth() == 3 && session.outbox().locationDepth() == 1);
+
+        assertThat(registry.unsubscribe(session, OFFICE)).isTrue();
+        assertThat(session.outbox().locationDepth()).as("pending office location purged").isZero();
+
+        publish(status("e3"), ALL);
+        desk.release(100);
+        await().atMost(WAIT).until(() -> desk.sent().stream().filter(e -> e.topic().equals(TRIP)).count() == 3);
+        await().during(Duration.ofMillis(200)).atMost(WAIT).until(() -> desk.sent().size() <= 4);
+        assertThat(desk.sent().stream().filter(e -> e.topic().equals(TRIP)).map(e -> e.event().eventId()))
+                .containsExactly("warm-up", "e2", "e3");
+        assertThat(desk.sent().stream().filter(e -> e.topic().equals(OFFICE)).map(e -> e.event().eventId()).toList())
+                .as("only the frame already in the writer's hands may still be an office event")
+                .isSubsetOf(List.of("warm-up"));
+        assertThat(desk.sent()).noneMatch(e -> e.type().isConflatable());
+    }
+
+    @Test
     void historyTrimmedBeyondTheCursorForcesResync() {
         InMemoryEventStore small = new InMemoryEventStore(3);
         SubscriptionRegistry smallRegistry = new SubscriptionRegistry(small, 3, executor, 512, 64);

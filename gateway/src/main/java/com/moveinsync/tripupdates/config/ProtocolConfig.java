@@ -3,6 +3,8 @@ package com.moveinsync.tripupdates.config;
 import com.moveinsync.tripupdates.auth.TopicAuthorizer;
 import com.moveinsync.tripupdates.auth.TopicDirectory;
 import com.moveinsync.tripupdates.gateway.SubscriptionRegistry;
+import com.moveinsync.tripupdates.observability.MicrometerGatewayMetrics;
+import com.moveinsync.tripupdates.ws.ConnectionMaintenance;
 import com.moveinsync.tripupdates.ws.ProtocolCodec;
 import com.moveinsync.tripupdates.ws.ProtocolService;
 import com.moveinsync.tripupdates.ws.TripUpdatesWebSocketHandler;
@@ -25,15 +27,25 @@ class ProtocolConfig {
 
     @Bean
     ProtocolService protocolService(SubscriptionRegistry subscriptionRegistry, TopicAuthorizer topicAuthorizer,
-            ProtocolCodec protocolCodec, AppProperties properties) {
+            ProtocolCodec protocolCodec, AppProperties properties, MicrometerGatewayMetrics gatewayMetrics) {
         return new ProtocolService(subscriptionRegistry, topicAuthorizer, protocolCodec,
-                properties.websocket().maxMessageChars(), properties.outbox().maxSubscriptionsPerConnection());
+                properties.websocket().maxMessageChars(), properties.outbox().maxSubscriptionsPerConnection(),
+                gatewayMetrics);
     }
 
     @Bean
     TripUpdatesWebSocketHandler tripUpdatesWebSocketHandler(SubscriptionRegistry subscriptionRegistry,
             ProtocolService protocolService, ProtocolCodec protocolCodec) {
         return new TripUpdatesWebSocketHandler(subscriptionRegistry, protocolService, protocolCodec);
+    }
+
+    /** Heartbeat / idle timeout and periodic authorization refresh of open connections. */
+    @Bean(destroyMethod = "close")
+    ConnectionMaintenance connectionMaintenance(TripUpdatesWebSocketHandler handler, ProtocolService protocolService,
+            AppProperties properties) {
+        return new ConnectionMaintenance(handler::connections, protocolService,
+                properties.websocket().heartbeatInterval(), properties.websocket().idleTimeout(),
+                properties.auth().revalidateInterval());
     }
 
     /**

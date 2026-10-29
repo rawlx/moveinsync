@@ -5,6 +5,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.moveinsync.tripupdates.domain.DelayPayload;
+import com.moveinsync.tripupdates.domain.GeoPoint;
+import com.moveinsync.tripupdates.domain.SosPayload;
+import com.moveinsync.tripupdates.domain.SosRaiser;
 import com.moveinsync.tripupdates.domain.StatusPayload;
 import com.moveinsync.tripupdates.domain.TenantTopic;
 import com.moveinsync.tripupdates.domain.TopicId;
@@ -13,6 +17,10 @@ import com.moveinsync.tripupdates.domain.TripStatus;
 import com.moveinsync.tripupdates.gateway.SubscriptionRegistry;
 import com.moveinsync.tripupdates.publish.EventPublisher;
 import com.moveinsync.tripupdates.store.AppendResult;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.net.http.WebSocketHandshakeException;
 import java.time.Duration;
 import java.time.Instant;
@@ -22,6 +30,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -31,8 +40,12 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
-/** {@code /ws} end to end: real Tomcat, real Redis, dev authentication, JDK WebSocket client. */
+/**
+ * {@code /ws} end to end: real Tomcat, real Redis, dev authentication, JDK WebSocket client. Observability is
+ * auto-configured (Spring Boot disables metrics export in tests otherwise) so the Prometheus endpoint can be checked.
+ */
 @Testcontainers
+@AutoConfigureObservability
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class WebSocketEndpointIT {
 
@@ -227,6 +240,7 @@ class WebSocketEndpointIT {
 
     @Test
     void frozenClientIsDisconnectedWhileOthersKeepReceiving() throws Exception {
+        int connectionsBefore = handler.connectionCount();
         WsTestClient frozen = WsTestClient.connect(port, "dev-acme-admin-o1", true);
         WsTestClient healthy = WsTestClient.connect(port, "dev-acme-admin-o1");
         frozen.send(subscribe("f1", "office:O-1"));
@@ -243,8 +257,68 @@ class WebSocketEndpointIT {
         assertThat(received).extracting(e -> e.get("seq").asLong()).isSorted().doesNotHaveDuplicates();
 
         await().atMost(Duration.ofSeconds(30)).until(() -> registry.feed(office).subscriptionCount() == 1);
+        // The gateway forgets the frozen connection immediately, even though its socket write is still blocked.
+        await().atMost(Duration.ofSeconds(10)).until(() -> handler.connectionCount() == connectionsBefore + 1);
         healthy.close();
         frozen.abort();
+    }
+
+    @Test
+    void reconnectAfterDropResumesStatusDelayAndSosInOrder() throws Exception {
+        WsTestClient desk = WsTestClient.connect(port, "dev-acme-admin-o1");
+        desk.send(subscribe("m1", "office:O-1"));
+        assertThat(desk.next().get("type").asText()).isEqualTo("SUBSCRIBED");
+        publishAcmeT1();
+        long lastProcessed = desk.next().get("seq").asLong();
+        desk.abort(); // network drop, no close handshake
+
+        List<TopicId> sosTopics = List.of(TopicId.trip("T-1"), TopicId.cab("C-1"), TopicId.office("O-1"),
+                TopicId.sos("O-1"));
+        List<Long> missed = List.of(
+                publisher.publish(new TripEvent("e-" + IDS.incrementAndGet(), "acme", "T-1", "C-1", Instant.now(),
+                        new StatusPayload(TripStatus.ARRIVED)), T1_TOPICS).appended().events().get(2).seq(),
+                publisher.publish(new TripEvent("e-" + IDS.incrementAndGet(), "acme", "T-1", "C-1", Instant.now(),
+                        new DelayPayload(4, "TRAFFIC")), T1_TOPICS).appended().events().get(2).seq(),
+                publisher.publish(new TripEvent("e-" + IDS.incrementAndGet(), "acme", "T-1", "C-1", Instant.now(),
+                        new SosPayload("S-1", SosRaiser.EMPLOYEE, new GeoPoint(12.9, 77.6))), sosTopics)
+                        .appended().events().get(2).seq());
+
+        WsTestClient again = WsTestClient.connect(port, "dev-acme-admin-o1");
+        again.send("{\"type\":\"RESUME\",\"id\":\"r1\",\"topic\":\"office:O-1\",\"lastSeq\":" + lastProcessed + "}");
+        List<JsonNode> replay = again.next(4);
+        assertThat(replay.subList(0, 3)).extracting(e -> e.at("/event/type").asText())
+                .containsExactly("STATUS", "DELAY", "SOS");
+        assertThat(replay.subList(0, 3)).extracting(e -> e.get("seq").asLong()).containsExactlyElementsOf(missed);
+        assertThat(replay.get(3).get("type").asText()).isEqualTo("RESUME_COMPLETE");
+        again.close();
+    }
+
+    @Test
+    void prometheusEndpointExposesPipelineMetricsWithoutIdentifierLabels() throws Exception {
+        WsTestClient employee = WsTestClient.connect(port, "dev-acme-emp-1");
+        employee.send(subscribe("m1", "trip:T-1"));
+        employee.send(subscribe("m2", "trip:T-2")); // forbidden
+        employee.next(2);
+        publishAcmeT1();
+        employee.next();
+
+        HttpResponse<String> response = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/actuator/prometheus")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode()).isEqualTo(200);
+        String body = response.body();
+        assertThat(body).contains(
+                "tripupdates_delivery_lag_seconds_count{",
+                "tripupdates_subscriptions_requests_total{",
+                "outcome=\"FORBIDDEN\"",
+                "tripupdates_outbox_depth{",
+                "tripupdates_sessions_active",
+                "tripupdates_notifications_publish_failures_total",
+                "tripupdates_reconciliations_total");
+        for (String line : body.lines().filter(l -> l.startsWith("tripupdates_")).toList()) {
+            assertThat(line).as(line).doesNotContain("acme", "T-1", "T-2", "C-1", "O-1", "emp-1", "dev-acme");
+        }
+        employee.close();
     }
 
     @Test

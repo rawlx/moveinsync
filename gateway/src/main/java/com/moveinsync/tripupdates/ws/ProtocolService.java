@@ -5,9 +5,11 @@ import com.moveinsync.tripupdates.auth.TopicAuthorizer;
 import com.moveinsync.tripupdates.domain.TopicId;
 import com.moveinsync.tripupdates.gateway.AttachOutcome;
 import com.moveinsync.tripupdates.gateway.ClientSession;
+import com.moveinsync.tripupdates.gateway.GatewayMetrics;
 import com.moveinsync.tripupdates.gateway.Subscription;
 import com.moveinsync.tripupdates.gateway.SubscriptionRegistry;
 import com.moveinsync.tripupdates.store.EventStoreException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,8 +25,41 @@ public final class ProtocolService {
     private static final Logger log = LoggerFactory.getLogger(ProtocolService.class);
     private static final String NOT_PERMITTED = "Subscription not permitted";
 
-    /** An authenticated connection: who it is and where its frames go. */
-    public record Connection(Identity identity, ClientSession session) {
+    /**
+     * An authenticated connection: who it is, where its frames go, and when the client was last heard from
+     * (any text frame or pong), which drives the idle timeout.
+     */
+    public static final class Connection {
+
+        private final Identity identity;
+        private final ClientSession session;
+        private final AtomicLong lastInboundMillis = new AtomicLong(System.currentTimeMillis());
+
+        public Connection(Identity identity, ClientSession session) {
+            this.identity = identity;
+            this.session = session;
+        }
+
+        public Identity identity() {
+            return identity;
+        }
+
+        public ClientSession session() {
+            return session;
+        }
+
+        /** Records inbound activity from the client. */
+        public void touch() {
+            touchAt(System.currentTimeMillis());
+        }
+
+        void touchAt(long millis) {
+            lastInboundMillis.set(millis);
+        }
+
+        public long lastInboundMillis() {
+            return lastInboundMillis.get();
+        }
     }
 
     private final SubscriptionRegistry registry;
@@ -32,18 +67,26 @@ public final class ProtocolService {
     private final ProtocolCodec codec;
     private final int maxMessageChars;
     private final int maxSubscriptions;
+    private final GatewayMetrics metrics;
 
     public ProtocolService(SubscriptionRegistry registry, TopicAuthorizer authorizer, ProtocolCodec codec,
             int maxMessageChars, int maxSubscriptions) {
+        this(registry, authorizer, codec, maxMessageChars, maxSubscriptions, GatewayMetrics.NOOP);
+    }
+
+    public ProtocolService(SubscriptionRegistry registry, TopicAuthorizer authorizer, ProtocolCodec codec,
+            int maxMessageChars, int maxSubscriptions, GatewayMetrics metrics) {
         this.registry = registry;
         this.authorizer = authorizer;
         this.codec = codec;
         this.maxMessageChars = maxMessageChars;
         this.maxSubscriptions = maxSubscriptions;
+        this.metrics = metrics;
     }
 
     /** Handles one text frame. Never throws for client mistakes; replies with {@code ERROR} instead. */
     public void handle(Connection connection, String text) {
+        connection.touch();
         if (connection.session().isClosed()) {
             return;
         }
@@ -70,6 +113,10 @@ public final class ProtocolService {
                 case ClientMessage.Ack ack -> acknowledge(connection, ack);
             }
         } catch (EventStoreException e) {
+            if (message instanceof ClientMessage.Subscribe || message instanceof ClientMessage.Resume) {
+                metrics.subscriptionRequest(message instanceof ClientMessage.Resume,
+                        GatewayMetrics.SubscriptionOutcome.UNAVAILABLE);
+            }
             log.warn("Event store unavailable while handling {} for session {}", message.getClass().getSimpleName(),
                     connection.session().id(), e);
             reply(connection, ServerMessage.Error.of(message.id(), ErrorCode.UNAVAILABLE,
@@ -83,7 +130,9 @@ public final class ProtocolService {
     private void attach(Connection connection, ClientMessage message, Long resumeAfter,
             Function<AttachOutcome.Attached, ServerMessage> confirmation) {
         TopicId topic = message.topic();
+        boolean resume = resumeAfter != null;
         if (!authorizer.mayRead(connection.identity(), topic)) {
+            metrics.subscriptionRequest(resume, GatewayMetrics.SubscriptionOutcome.FORBIDDEN);
             log.info("Denied {} of {} to {} ({})", message.getClass().getSimpleName(), topic,
                     connection.identity().subject(), connection.identity().tenantId());
             reply(connection, ServerMessage.Error.of(message.id(), ErrorCode.FORBIDDEN, NOT_PERMITTED, topic));
@@ -91,6 +140,16 @@ public final class ProtocolService {
         }
         AttachOutcome outcome = registry.attach(connection.session(), topic, resumeAfter, maxSubscriptions,
                 confirmation::apply);
+        metrics.subscriptionRequest(resume, switch (outcome) {
+            case AttachOutcome.Attached attached -> GatewayMetrics.SubscriptionOutcome.ATTACHED;
+            case AttachOutcome.AlreadySubscribed already -> GatewayMetrics.SubscriptionOutcome.ALREADY_SUBSCRIBED;
+            case AttachOutcome.LimitReached limit -> GatewayMetrics.SubscriptionOutcome.LIMIT_REACHED;
+            case AttachOutcome.HistoryUnavailable unavailable -> GatewayMetrics.SubscriptionOutcome.RECOVERY_REQUIRED;
+        });
+        if (outcome instanceof AttachOutcome.HistoryUnavailable) {
+            log.info("RESUME of {} for session {} needs recovery: position outside the retained history", topic,
+                    connection.session().id());
+        }
         switch (outcome) {
             case AttachOutcome.Attached attached -> {
                 // Confirmation already queued, in order, by the feed.
@@ -106,6 +165,28 @@ public final class ProtocolService {
                     new ServerMessage.Recovery(unavailable.requestedSeq(), unavailable.floorSeq(),
                             unavailable.headSeq())));
         }
+    }
+
+    /**
+     * Re-checks every live subscription of the connection against the current directory (bounded authorization
+     * refresh, run periodically). A subscription that is no longer permitted, e.g. after a trip was reassigned, is
+     * removed together with its pending events, and the client gets {@code ERROR SUBSCRIPTION_REVOKED}.
+     *
+     * @return the number of subscriptions revoked
+     */
+    public int revalidate(Connection connection) {
+        int revoked = 0;
+        for (TopicId topic : registry.topicsOf(connection.session())) {
+            if (!authorizer.mayRead(connection.identity(), topic) && registry.unsubscribe(connection.session(), topic)) {
+                revoked++;
+                metrics.subscriptionRevoked();
+                log.info("Revoked subscription of session {} to {}: no longer permitted", connection.session().id(),
+                        topic);
+                reply(connection, ServerMessage.Error.of(null, ErrorCode.SUBSCRIPTION_REVOKED,
+                        "Subscription no longer permitted", topic));
+            }
+        }
+        return revoked;
     }
 
     private void unsubscribe(Connection connection, ClientMessage.Unsubscribe unsubscribe) {

@@ -101,6 +101,24 @@ class ClientOutboxTest {
     }
 
     @Test
+    void discardTopicRemovesOnlyThatTopicsPendingEventsAndKeepsControls() throws InterruptedException {
+        OutboundFrame.ControlMessage confirmed = new OutboundFrame.ControlMessage() { };
+        outbox.offer(sequenced(status("trip-1"), TRIP, 1));
+        outbox.offer(sequenced(status("office-1"), OFFICE, 2));
+        outbox.offer(sequenced(location("trip-loc", "C-1", 1), CAB, 3));
+        outbox.offer(sequenced(location("office-loc", "C-1", 1), OFFICE, 4));
+        outbox.offerControl(confirmed);
+
+        assertThat(outbox.discardTopic(OFFICE)).isEqualTo(2);
+
+        assertThat(outbox.take()).isEqualTo(new OutboundFrame.EventFrame(sequenced(status("trip-1"), TRIP, 1)));
+        assertThat(outbox.take()).isEqualTo(new OutboundFrame.ControlFrame(confirmed));
+        assertThat(event(outbox.take()).event().eventId()).isEqualTo("trip-loc");
+        assertThat(outbox.reliableDepth() + outbox.locationDepth()).isZero();
+        assertThat(outbox.discardTopic(OFFICE)).isZero();
+    }
+
+    @Test
     void reliableOverflowClosesTheOutboxInsteadOfDroppingSilently() throws InterruptedException {
         for (int i = 1; i <= 4; i++) {
             outbox.offer(sequenced(status("e" + i), TRIP, i));

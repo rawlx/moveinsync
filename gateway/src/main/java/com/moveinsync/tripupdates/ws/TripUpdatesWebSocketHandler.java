@@ -4,10 +4,12 @@ import com.moveinsync.tripupdates.auth.Identity;
 import com.moveinsync.tripupdates.gateway.ClientSession;
 import com.moveinsync.tripupdates.gateway.CloseReason;
 import com.moveinsync.tripupdates.gateway.SubscriptionRegistry;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.socket.CloseStatus;
+import org.springframework.web.socket.PongMessage;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
@@ -38,10 +40,19 @@ public final class TripUpdatesWebSocketHandler extends TextWebSocketHandler {
             webSocket.close(CloseStatus.POLICY_VIOLATION); // unreachable when the interceptor is installed
             return;
         }
-        ClientSession session = registry.open("ws-" + webSocket.getId().replaceAll("[^A-Za-z0-9_-]", ""),
-                identity.tenantId(), new WebSocketClientTransport(webSocket, codec));
+        String key = webSocket.getId();
+        ClientSession session = registry.open("ws-" + key.replaceAll("[^A-Za-z0-9_-]", ""), identity.tenantId(),
+                new WebSocketClientTransport(webSocket, codec, () -> connections.remove(key)));
         connections.put(webSocket.getId(), new ProtocolService.Connection(identity, session));
         log.debug("Connection {} opened for {} ({})", session.id(), identity.subject(), identity.tenantId());
+    }
+
+    @Override
+    protected void handlePongMessage(WebSocketSession webSocket, PongMessage message) {
+        ProtocolService.Connection connection = connections.get(webSocket.getId());
+        if (connection != null) {
+            connection.touch();
+        }
     }
 
     @Override
@@ -65,6 +76,11 @@ public final class TripUpdatesWebSocketHandler extends TextWebSocketHandler {
     /** Number of open connections (diagnostics, tests). */
     public int connectionCount() {
         return connections.size();
+    }
+
+    /** Snapshot of the open connections, for periodic maintenance (heartbeat, authorization refresh). */
+    public List<ProtocolService.Connection> connections() {
+        return List.copyOf(connections.values());
     }
 
     private void close(WebSocketSession webSocket, CloseReason reason) {

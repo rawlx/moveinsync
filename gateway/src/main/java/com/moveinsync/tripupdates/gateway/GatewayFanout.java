@@ -22,10 +22,16 @@ import java.util.concurrent.TimeUnit;
 public final class GatewayFanout implements NotificationListener, AutoCloseable {
 
     private final SubscriptionRegistry registry;
+    private final GatewayMetrics metrics;
     private final ScheduledExecutorService ticker;
 
     public GatewayFanout(SubscriptionRegistry registry, Duration reconcileInterval) {
+        this(registry, reconcileInterval, GatewayMetrics.NOOP);
+    }
+
+    public GatewayFanout(SubscriptionRegistry registry, Duration reconcileInterval, GatewayMetrics metrics) {
         this.registry = registry;
+        this.metrics = metrics;
         this.ticker = Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform()
                 .name("fanout-reconcile").daemon(true).factory());
         long millis = reconcileInterval.toMillis();
@@ -49,6 +55,7 @@ public final class GatewayFanout implements NotificationListener, AutoCloseable 
 
     /** Re-reads every locally subscribed topic from its cursor. Idempotent; never blocks. */
     public void reconcileAll() {
+        metrics.reconciliationRun();
         registry.feeds().forEach(TopicFeed::requestCatchUp);
     }
 

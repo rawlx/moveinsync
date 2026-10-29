@@ -29,14 +29,18 @@ public record AppProperties(
         DEV
     }
 
-    public record Auth(@NotNull AuthMode mode) {
+    /** {@code revalidateInterval}: how often live subscriptions are re-authorised (bounds permission staleness). */
+    public record Auth(@NotNull AuthMode mode, @NotNull Duration revalidateInterval) {
     }
 
     /**
      * @param maxMessageChars       longest accepted client frame
      * @param allowedOriginPatterns browser origins allowed to connect; empty means same-origin only
+     * @param heartbeatInterval     how often the gateway pings each connection
+     * @param idleTimeout           a connection with no inbound traffic (including pongs) for this long is closed
      */
-    public record WebSocket(@Min(256) int maxMessageChars, @NotNull List<String> allowedOriginPatterns) {
+    public record WebSocket(@Min(256) int maxMessageChars, @NotNull List<String> allowedOriginPatterns,
+            @NotNull Duration heartbeatInterval, @NotNull Duration idleTimeout) {
     }
 
     /** {@code commandTimeout} bounds every Redis command; a timed-out append has an unknown outcome. */

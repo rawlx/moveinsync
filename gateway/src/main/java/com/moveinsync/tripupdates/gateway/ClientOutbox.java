@@ -159,6 +159,25 @@ public final class ClientOutbox {
         }
     }
 
+    /**
+     * Removes every pending event of {@code topic} (reliable and location) after the client unsubscribed from it.
+     * This is not a silent drop: the client asked to stop receiving the topic. Control messages are kept.
+     *
+     * @return the number of frames removed
+     */
+    public int discardTopic(TopicId topic) {
+        lock.lock();
+        try {
+            int before = reliable.size() + locations.size();
+            reliable.removeIf(frame -> frame instanceof OutboundFrame.EventFrame(SequencedEvent event)
+                    && event.topic().equals(topic));
+            locations.keySet().removeIf(key -> key.topic().equals(topic));
+            return before - reliable.size() - locations.size();
+        } finally {
+            lock.unlock();
+        }
+    }
+
     public boolean isClosed() {
         lock.lock();
         try {

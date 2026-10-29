@@ -17,6 +17,8 @@ public enum ErrorCode {
     INVALID_ACK,
     /** RESUME position not available in the retained history; the client must recover (no snapshot yet). */
     RECOVERY_REQUIRED,
+    /** A live subscription was removed because the identity is no longer authorised for the topic. */
+    SUBSCRIPTION_REVOKED,
     /** Event store temporarily unavailable; retry later. */
     UNAVAILABLE,
     INTERNAL
