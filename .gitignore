@@ -1,0 +1,26 @@
+# Build output
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# Local environment and secrets
+.env
+*.env
+!.env.example
+
+# Generated load-test / benchmark output
+loadtest-results/
+*.hprof
+
+# OS
+.DS_Store
+Thumbs.db

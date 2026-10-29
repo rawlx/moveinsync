@@ -1,0 +1,44 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: trip-updates-gateway
+  threads:
+    virtual:
+      enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      node: ${app.node-id}
+
+logging:
+  structured:
+    format:
+      console: ecs
+
+app:
+  node-id: ${APP_NODE_ID:local}
+  redis:
+    uri: ${APP_REDIS_URI:redis://localhost:6379}
+  outbox:
+    critical-capacity: 512
+    location-capacity: 2048
+    pending-capacity: 1000
+    max-subscriptions-per-connection: 50
+    send-timeout: 10s
+  retention:
+    log-max-length: 1000
+    bus-max-length: 100000
+    topic-key-ttl: 24h
+    dedup-ttl: 5m

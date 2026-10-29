@@ -1,0 +1,9 @@
+**/target/
+.git/
+.idea/
+.vscode/
+docs/
+loadtest-results/
+*.pdf
+*.md
+.env
