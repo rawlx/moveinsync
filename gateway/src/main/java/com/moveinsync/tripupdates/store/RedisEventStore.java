@@ -2,6 +2,7 @@ package com.moveinsync.tripupdates.store;
 
 import com.moveinsync.tripupdates.config.AppProperties;
 import com.moveinsync.tripupdates.domain.DomainValidationException;
+import com.moveinsync.tripupdates.domain.Identifiers;
 import com.moveinsync.tripupdates.domain.SequencedEvent;
 import com.moveinsync.tripupdates.domain.TenantTopic;
 import com.moveinsync.tripupdates.domain.TopicId;
@@ -29,6 +30,7 @@ import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.Supplier;
 
 /**
@@ -45,6 +47,7 @@ public final class RedisEventStore implements EventStore, AutoCloseable {
     private static final Script APPEND_ORDERED = Script.load("redis/append-ordered.lua");
     private static final Script APPEND_LOCATION = Script.load("redis/append-location.lua");
     private static final Script READ_AFTER = Script.load("redis/read-after.lua");
+    private static final Script OPEN_TOPIC = Script.load("redis/open-topic.lua");
 
     private final RedisClient client;
     private final AppProperties.Retention retention;
@@ -106,6 +109,17 @@ public final class RedisEventStore implements EventStore, AutoCloseable {
     }
 
     @Override
+    public long openTopic(TenantTopic topic) {
+        if (topic == null) {
+            throw new DomainValidationException("topic", "is required");
+        }
+        List<Object> reply = read(() -> eval(OPEN_TOPIC,
+                new String[] {RedisKeys.seq(topic), RedisKeys.floor(topic)},
+                Long.toString(retention.topicKeyTtl().toSeconds())));
+        return (Long) reply.get(0);
+    }
+
+    @Override
     public List<SequencedEvent> latestLocations(TenantTopic topic) {
         if (topic == null) {
             throw new DomainValidationException("topic", "is required");
@@ -113,16 +127,34 @@ public final class RedisEventStore implements EventStore, AutoCloseable {
         Map<String, String> byCab = read(() -> connection().sync().hgetall(RedisKeys.loc(topic)));
         List<SequencedEvent> latest = new ArrayList<>();
         for (String value : byCab.values()) {
-            int first = value.indexOf('|');
-            int second = value.indexOf('|', first + 1);
-            if (first < 0 || second < 0) {
-                throw new EventStoreException("Stored location on " + topic + " is malformed", null);
-            }
-            latest.add(decode(topic, value.substring(second + 1), Long.parseLong(value.substring(0, first)),
-                    value.substring(first + 1, second)));
+            latest.add(decodeLocation(topic, value));
         }
         latest.sort(Comparator.comparingLong(SequencedEvent::seq));
         return latest;
+    }
+
+    @Override
+    public Optional<SequencedEvent> latestLocation(TenantTopic topic, String cabId) {
+        if (topic == null) {
+            throw new DomainValidationException("topic", "is required");
+        }
+        Identifiers.require(cabId, "cabId");
+        String value = read(() -> connection().sync().hget(RedisKeys.loc(topic), cabId));
+        return value == null ? Optional.empty() : Optional.of(decodeLocation(topic, value));
+    }
+
+    private SequencedEvent decodeLocation(TenantTopic topic, String value) {
+        int first = value.indexOf('|');
+        int second = value.indexOf('|', first + 1);
+        if (first < 0 || second < 0) {
+            throw new EventStoreException("Stored location on " + topic + " is malformed", null);
+        }
+        try {
+            return decode(topic, value.substring(second + 1), Long.parseLong(value.substring(0, first)),
+                    value.substring(first + 1, second));
+        } catch (NumberFormatException e) {
+            throw new EventStoreException("Stored location on " + topic + " is malformed", e);
+        }
     }
 
     @Override

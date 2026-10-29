@@ -17,7 +17,8 @@ public record AppProperties(
         @NotBlank String nodeId,
         @Valid @NotNull Redis redis,
         @Valid @NotNull Outbox outbox,
-        @Valid @NotNull Retention retention) {
+        @Valid @NotNull Retention retention,
+        @Valid @NotNull Notifications notifications) {
 
     /** {@code commandTimeout} bounds every Redis command; a timed-out append has an unknown outcome. */
     public record Redis(@NotBlank String uri, @NotNull Duration commandTimeout) {
@@ -38,5 +39,12 @@ public record AppProperties(
             @Min(1) int busMaxLength,
             @NotNull Duration topicKeyTtl,
             @NotNull Duration dedupTtl) {
+    }
+
+    /**
+     * Pub/Sub notifications. {@code reconcileInterval} bounds how long a durable event can wait for delivery when
+     * its notification was lost.
+     */
+    public record Notifications(@NotBlank String channel, @NotNull Duration reconcileInterval) {
     }
 }

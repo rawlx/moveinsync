@@ -5,6 +5,7 @@ import com.moveinsync.tripupdates.domain.TenantTopic;
 import com.moveinsync.tripupdates.domain.TopicId;
 import com.moveinsync.tripupdates.domain.TripEvent;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Durable, per-topic sequenced event storage. Sequence numbers are assigned by the store, atomically with the
@@ -32,6 +33,16 @@ public interface EventStore {
      */
     TopicHistory readAfter(TenantTopic topic, long afterSeq, int limit);
 
+    /**
+     * The topic's head sequence, creating the topic (its sequence base) if it does not exist yet. A reader that
+     * starts at this position can read every later ordered event with {@link #readAfter}; without it, a topic
+     * created after the reader started would look like trimmed history.
+     */
+    long openTopic(TenantTopic topic);
+
     /** The latest location per cab on a topic, ordered by sequence number. */
     List<SequencedEvent> latestLocations(TenantTopic topic);
+
+    /** The latest location of one cab on a topic, if any. */
+    Optional<SequencedEvent> latestLocation(TenantTopic topic, String cabId);
 }

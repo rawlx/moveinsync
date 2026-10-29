@@ -43,3 +43,6 @@ app:
     bus-max-length: 100000
     topic-key-ttl: 24h
     dedup-ttl: 5m
+  notifications:
+    channel: notify:events
+    reconcile-interval: 5s

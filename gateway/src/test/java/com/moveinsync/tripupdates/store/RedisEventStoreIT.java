@@ -446,6 +446,33 @@ class RedisEventStoreIT {
         }
 
         @Test
+        void readerOpeningATopicBeforeItsFirstEventSeesNoGap() {
+            TenantTopic trip = acme(TopicId.trip("T-1"));
+            long opened = store.openTopic(trip);
+            assertThat(store.openTopic(trip)).as("idempotent").isEqualTo(opened);
+
+            AppendResult first = store.append(TestEvents.status("e1", TripStatus.ASSIGNED), List.of(TopicId.trip("T-1")));
+
+            assertThat(first.events().get(0).seq()).isEqualTo(opened + 1);
+            TopicHistory history = store.readAfter(trip, opened, 10);
+            assertThat(history.gap()).isFalse();
+            assertThat(history.events()).containsExactlyElementsOf(first.events());
+            // Without openTopic a reader at position 0 would see a gap (the topic's base is above 0).
+            assertThat(store.readAfter(acme(TopicId.trip("T-2")), 0, 10).gap()).isFalse();
+            store.append(TestEvents.status("acme", "e2", "T-2", "C-1", TripStatus.ASSIGNED), List.of(TopicId.trip("T-2")));
+            assertThat(store.readAfter(acme(TopicId.trip("T-2")), 0, 10).gap()).isTrue();
+        }
+
+        @Test
+        void openTopicReturnsTheHeadOfAnExistingTopic() {
+            TenantTopic trip = acme(TopicId.trip("T-1"));
+            long head = store.append(TestEvents.status("e1", TripStatus.ASSIGNED), List.of(TopicId.trip("T-1")))
+                    .events().get(0).seq();
+            assertThat(store.openTopic(trip)).isEqualTo(head);
+            assertThat(redis.ttl(RedisKeys.seq(trip))).isPositive();
+        }
+
+        @Test
         void unknownTopicHasNoHistoryAndNoGapAtZero() {
             TopicHistory history = store.readAfter(acme(TopicId.trip("NEW")), 0, 10);
             assertThat(history.headSeq()).isZero();
