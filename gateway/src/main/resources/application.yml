@@ -31,6 +31,7 @@ app:
   node-id: ${APP_NODE_ID:local}
   redis:
     uri: ${APP_REDIS_URI:redis://localhost:6379}
+    command-timeout: 2s
   outbox:
     critical-capacity: 512
     location-capacity: 2048

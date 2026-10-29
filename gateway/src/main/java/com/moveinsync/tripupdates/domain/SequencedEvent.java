@@ -25,6 +25,14 @@ public record SequencedEvent(TripEvent event, TopicId topic, long seq, Instant p
         if (publishedAt == null) {
             throw new DomainValidationException("publishedAt", "is required");
         }
+        requireDeliverableOn(event, topic);
+    }
+
+    /**
+     * Checks that {@code event} may be delivered on {@code topic}: a trip topic must name the event's trip and a cab
+     * topic the event's cab. Used before sequencing so that an inconsistent append never reaches the store.
+     */
+    public static void requireDeliverableOn(TripEvent event, TopicId topic) {
         switch (topic.kind()) {
             case TRIP -> {
                 if (!topic.id().equals(event.tripId())) {

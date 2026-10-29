@@ -19,7 +19,8 @@ public record AppProperties(
         @Valid @NotNull Outbox outbox,
         @Valid @NotNull Retention retention) {
 
-    public record Redis(@NotBlank String uri) {
+    /** {@code commandTimeout} bounds every Redis command; a timed-out append has an unknown outcome. */
+    public record Redis(@NotBlank String uri, @NotNull Duration commandTimeout) {
     }
 
     /** Per-connection bounds (ADR-0006). */

@@ -16,6 +16,7 @@ class TripUpdatesApplicationTest {
 
     @Test
     void contextLoadsAndBindsDocumentedDefaults() {
+        assertThat(properties.redis().commandTimeout()).isEqualTo(Duration.ofSeconds(2));
         assertThat(properties.outbox().criticalCapacity()).isEqualTo(512);
         assertThat(properties.outbox().locationCapacity()).isEqualTo(2048);
         assertThat(properties.outbox().pendingCapacity()).isEqualTo(1000);
