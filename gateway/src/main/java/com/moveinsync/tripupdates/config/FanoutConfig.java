@@ -9,6 +9,7 @@ import com.moveinsync.tripupdates.notify.RedisNotificationSubscriber;
 import com.moveinsync.tripupdates.observability.MicrometerGatewayMetrics;
 import com.moveinsync.tripupdates.publish.EventPublisher;
 import com.moveinsync.tripupdates.store.EventStore;
+import com.moveinsync.tripupdates.store.RedisEventStore;
 import io.lettuce.core.RedisClient;
 import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -35,10 +36,31 @@ class FanoutConfig {
         return new EventRouter(topicDirectory);
     }
 
+    /**
+     * The SOS lane's own store connection and notification channel. Held in one bean so the default
+     * {@link EventStore} and {@link RedisNotificationPublisher} beans stay unambiguous.
+     */
+    @Bean(destroyMethod = "close")
+    PriorityLane priorityLane(RedisClient redisClient, AppProperties properties) {
+        return new PriorityLane(new RedisEventStore(redisClient, properties.retention()),
+                new RedisNotificationPublisher(redisClient,
+                        RedisNotificationPublisher.priorityChannel(properties.notifications().channel())));
+    }
+
+    record PriorityLane(RedisEventStore store, RedisNotificationPublisher notifications) implements AutoCloseable {
+
+        @Override
+        public void close() {
+            notifications.close();
+            store.close();
+        }
+    }
+
     @Bean
     EventPublisher eventPublisher(EventStore eventStore, RedisNotificationPublisher notificationPublisher,
-            EventRouter eventRouter, MeterRegistry meterRegistry) {
-        EventPublisher publisher = new EventPublisher(eventStore, notificationPublisher, eventRouter);
+            PriorityLane priorityLane, EventRouter eventRouter, MeterRegistry meterRegistry) {
+        EventPublisher publisher = new EventPublisher(eventStore, notificationPublisher, priorityLane.store(),
+                priorityLane.notifications(), eventRouter);
         FunctionCounter.builder("tripupdates.notifications.publish.failures", publisher,
                         EventPublisher::notificationFailures)
                 .description("Notifications not published after a durable append (recovered by reconciliation)")
@@ -80,7 +102,20 @@ class FanoutConfig {
     }
 
     @Bean
-    NotificationSubscriberLifecycle notificationSubscriber(RedisNotificationSubscriber redisNotificationSubscriber) {
-        return new NotificationSubscriberLifecycle(redisNotificationSubscriber);
+    NotificationSubscriberLifecycle notificationSubscriber(RedisNotificationSubscriber redisNotificationSubscriber,
+            AppProperties properties) {
+        return new NotificationSubscriberLifecycle(redisNotificationSubscriber, properties.notifications().channel());
+    }
+
+    /** SOS notifications, on their own channel and Pub/Sub connection (see {@link EventPublisher}). */
+    @Bean
+    NotificationSubscriberLifecycle priorityNotificationSubscriber(RedisClient redisClient,
+            GatewayFanout gatewayFanout, AppProperties properties, MeterRegistry meterRegistry) {
+        String channel = RedisNotificationPublisher.priorityChannel(properties.notifications().channel());
+        RedisNotificationSubscriber subscriber = new RedisNotificationSubscriber(redisClient, channel, gatewayFanout);
+        FunctionCounter.builder("tripupdates.notifications.priority.malformed", subscriber,
+                        RedisNotificationSubscriber::malformedCount)
+                .register(meterRegistry);
+        return new NotificationSubscriberLifecycle(subscriber, channel);
     }
 }

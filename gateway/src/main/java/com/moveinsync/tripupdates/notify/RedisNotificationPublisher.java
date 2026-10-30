@@ -18,6 +18,14 @@ public final class RedisNotificationPublisher implements NotificationPublisher, 
     private final ReentrantLock connectLock = new ReentrantLock();
     private volatile StatefulRedisConnection<String, String> connection;
 
+    /**
+     * The channel priority (SOS) notifications use next to {@code channel}. Gateways subscribe to both, each on its
+     * own Pub/Sub connection, so SOS notifications never wait behind location notifications.
+     */
+    public static String priorityChannel(String channel) {
+        return channel + ":sos";
+    }
+
     public RedisNotificationPublisher(RedisClient client, String channel) {
         this.client = client;
         this.channel = channel;

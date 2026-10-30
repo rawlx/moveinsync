@@ -4,7 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.moveinsync.tripupdates.auth.DevFixtures;
+import com.moveinsync.tripupdates.domain.GeoPoint;
 import com.moveinsync.tripupdates.domain.SequencedEvent;
+import com.moveinsync.tripupdates.domain.SosPayload;
+import com.moveinsync.tripupdates.domain.SosRaiser;
 import com.moveinsync.tripupdates.domain.StatusPayload;
 import com.moveinsync.tripupdates.domain.TenantTopic;
 import com.moveinsync.tripupdates.domain.TopicId;
@@ -49,6 +52,28 @@ class EventPublisherTest {
         assertThat(notifications.sent).containsExactly(EventNotification.of(outcome.appended()));
         assertThat(notifications.sent.get(0).topics()).extracting(EventNotification.TopicSeq::seq)
                 .containsExactlyElementsOf(outcome.appended().events().stream().map(SequencedEvent::seq).toList());
+    }
+
+    @Test
+    void sosUsesThePriorityLaneForAppendNotificationAndRenotifyAndEverythingElseTheDefaultLane() {
+        CountingStore priorityStore = new CountingStore();
+        FlakyPublisher priorityNotifications = new FlakyPublisher();
+        EventPublisher laned = new EventPublisher(store, notifications, priorityStore, priorityNotifications, null);
+        TripEvent sos = new TripEvent("s1", "acme", "T-1", "C-1", Instant.parse("2026-10-29T10:00:00Z"),
+                new SosPayload("S-1", SosRaiser.EMPLOYEE, new GeoPoint(12.9, 77.6)));
+
+        PublishOutcome status = laned.publish(status("e1"), TOPICS);
+        PublishOutcome alert = laned.publish(sos, TOPICS);
+
+        assertThat(store.appends).as("status on the default lane").isEqualTo(1);
+        assertThat(priorityStore.appends).as("SOS on the priority lane").isEqualTo(1);
+        assertThat(notifications.sent).containsExactly(EventNotification.of(status.appended()));
+        assertThat(priorityNotifications.sent).containsExactly(EventNotification.of(alert.appended()));
+
+        assertThat(laned.renotify(alert.appended())).isTrue();
+        assertThat(laned.renotify(status.appended())).isTrue();
+        assertThat(priorityNotifications.sent).hasSize(2);
+        assertThat(notifications.sent).hasSize(2);
     }
 
     @Test

@@ -264,6 +264,93 @@ class GatewayFanoutTest {
     }
 
     @Test
+    void sosSignalledWhileAFeedReadsLocationsIsDeliveredBeforeTheRemainingLocationReads() throws Exception {
+        // Every latestLocation read waits for a permit, so a drain with several pending locations can be held
+        // between two location reads. An SOS signalled meanwhile must not wait for the remaining location reads.
+        fanout.close();
+        GatedLocationStore gated = new GatedLocationStore(store);
+        registry = new SubscriptionRegistry(gated, 1000, executor, 512, 64);
+        fanout = new GatewayFanout(registry, Duration.ofHours(1));
+        RecordingTransport desk = RecordingTransport.open();
+        registry.subscribe(registry.open("desk", "acme", desk), OFFICE);
+
+        publish(location("w", "C-9", 1.0), List.of(TopicId.cab("C-9"), OFFICE));
+        await().atMost(WAIT).until(() -> gated.waiting() == 1); // the drain is held inside the warm-up read
+        publish(location("l1", "C-1", 1.0), List.of(CAB, OFFICE));
+        publish(location("l2", "C-2", 1.0), List.of(TopicId.cab("C-2"), OFFICE));
+        publish(location("l3", "C-3", 1.0), List.of(TopicId.cab("C-3"), OFFICE));
+        gated.permits.release(1); // warm-up done: the next drain pass takes l1..l3 as one batch
+        await().atMost(WAIT).until(() -> gated.locationReads() == 2 && gated.waiting() == 1);
+        AppendResult status = publish(status("s1"), ALL);
+        AppendResult sos = publish(sos("sos"), ALL);
+
+        gated.permits.release(1); // only the first location read of the batch may complete
+        await().atMost(WAIT).until(() -> desk.eventIds().contains("sos"));
+        assertThat(gated.locationReads()).as("SOS delivered before the batch's remaining location reads")
+                .isEqualTo(3);
+        assertThat(desk.eventIds()).as("reliable events keep their order").containsSubsequence("s1", "sos");
+        assertThat(desk.seqs().subList(desk.eventIds().indexOf("s1"), desk.eventIds().indexOf("sos") + 1))
+                .containsExactly(status.events().get(2).seq(), sos.events().get(2).seq());
+
+        gated.permits.release(10);
+        await().atMost(WAIT).until(() -> desk.sent().size() == 6);
+        assertThat(desk.eventIds()).containsExactlyInAnyOrder("w", "l1", "l2", "l3", "s1", "sos")
+                .doesNotHaveDuplicates();
+    }
+
+    /** Delegating store whose latestLocation reads each need a permit (outside the delegate's monitor). */
+    private static final class GatedLocationStore implements com.moveinsync.tripupdates.store.EventStore {
+        final java.util.concurrent.Semaphore permits = new java.util.concurrent.Semaphore(0);
+        private final InMemoryEventStore delegate;
+        private final java.util.concurrent.atomic.AtomicInteger waiting = new java.util.concurrent.atomic.AtomicInteger();
+        private final java.util.concurrent.atomic.AtomicInteger started = new java.util.concurrent.atomic.AtomicInteger();
+
+        GatedLocationStore(InMemoryEventStore delegate) {
+            this.delegate = delegate;
+        }
+
+        int waiting() {
+            return waiting.get();
+        }
+
+        int locationReads() {
+            return started.get();
+        }
+
+        @Override
+        public AppendResult append(TripEvent event, List<TopicId> topics) {
+            return delegate.append(event, topics);
+        }
+
+        @Override
+        public com.moveinsync.tripupdates.store.TopicHistory readAfter(TenantTopic topic, long afterSeq, int limit) {
+            return delegate.readAfter(topic, afterSeq, limit);
+        }
+
+        @Override
+        public long openTopic(TenantTopic topic) {
+            return delegate.openTopic(topic);
+        }
+
+        @Override
+        public List<SequencedEvent> latestLocations(TenantTopic topic) {
+            return delegate.latestLocations(topic);
+        }
+
+        @Override
+        public java.util.Optional<SequencedEvent> latestLocation(TenantTopic topic, String cabId) {
+            started.incrementAndGet();
+            waiting.incrementAndGet();
+            try {
+                permits.acquireUninterruptibly();
+            } finally {
+                waiting.decrementAndGet();
+            }
+            return delegate.latestLocation(topic, cabId);
+        }
+    }
+
+    @Test
     void slowClientIsDisconnectedWithoutDelayingOthers() {
         fanout.close();
         registry = new SubscriptionRegistry(store, 1000, executor, 8, 64);

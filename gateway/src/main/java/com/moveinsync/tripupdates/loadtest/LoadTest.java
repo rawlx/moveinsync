@@ -91,6 +91,8 @@ public final class LoadTest {
     private RedisClient redis;
     private RedisEventStore store;
     private RedisNotificationPublisher notifications;
+    private RedisEventStore priorityStore;
+    private RedisNotificationPublisher priorityNotifications;
     private EventPublisher publisher;
 
     public LoadTest(LoadTestConfig config) {
@@ -164,7 +166,13 @@ public final class LoadTest {
         store = new RedisEventStore(redis, new AppProperties.Retention(1000, 100_000, Duration.ofHours(24),
                 Duration.ofMinutes(5)));
         notifications = new RedisNotificationPublisher(redis, "notify:events");
-        publisher = new EventPublisher(store, notifications, new EventRouter(fleet.directory()));
+        // The same SOS lane as the gateways' own publisher: separate store connection and notification channel.
+        priorityStore = new RedisEventStore(redis, new AppProperties.Retention(1000, 100_000, Duration.ofHours(24),
+                Duration.ofMinutes(5)));
+        priorityNotifications = new RedisNotificationPublisher(redis,
+                RedisNotificationPublisher.priorityChannel("notify:events"));
+        publisher = new EventPublisher(store, notifications, priorityStore, priorityNotifications,
+                new EventRouter(fleet.directory()));
     }
 
     private void connectAll() throws InterruptedException {
@@ -648,6 +656,12 @@ public final class LoadTest {
         callbackExecutor.shutdownNow();
         if (notifications != null) {
             notifications.close();
+        }
+        if (priorityNotifications != null) {
+            priorityNotifications.close();
+        }
+        if (priorityStore != null) {
+            priorityStore.close();
         }
         if (store != null) {
             store.close();

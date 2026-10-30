@@ -6,6 +6,7 @@ import com.moveinsync.tripupdates.domain.TenantTopic;
 import com.moveinsync.tripupdates.store.EventStore;
 import com.moveinsync.tripupdates.store.TopicHistory;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -59,7 +60,8 @@ public final class TopicFeed {
     private final Object pendingLock = new Object();
     private long pendingOrderedSeq; // guarded by pendingLock; 0 = none
     private boolean catchUpRequested; // guarded by pendingLock
-    private final Map<String, Long> pendingLocationSeqByCab = new HashMap<>(); // guarded by pendingLock
+    // Signal order, so a batch of location reads is served first come, first served. Guarded by pendingLock.
+    private final Map<String, Long> pendingLocationSeqByCab = new LinkedHashMap<>();
     private final AtomicBoolean scheduled = new AtomicBoolean();
 
     TopicFeed(TenantTopic topic, EventStore store, int pageSize, Executor executor, GatewayMetrics metrics) {
@@ -222,7 +224,7 @@ public final class TopicFeed {
             synchronized (pendingLock) {
                 orderedSeq = pendingOrderedSeq;
                 force = catchUpRequested;
-                locations = pendingLocationSeqByCab.isEmpty() ? Map.of() : new HashMap<>(pendingLocationSeqByCab);
+                locations = pendingLocationSeqByCab.isEmpty() ? Map.of() : new LinkedHashMap<>(pendingLocationSeqByCab);
                 pendingOrderedSeq = 0;
                 catchUpRequested = false;
                 pendingLocationSeqByCab.clear();
@@ -262,6 +264,12 @@ public final class TopicFeed {
                 catchUp();
             }
             for (Map.Entry<String, Long> location : locations.entrySet()) {
+                // SOS and status signalled meanwhile go first: each location read is a Redis round trip, and a
+                // batch of them must not hold reliable events back. The catch-up reads from the cursor, so order is
+                // unchanged; locations are independent latest values and may be interleaved.
+                if (orderedEventsPending()) {
+                    catchUp();
+                }
                 deliverLatestLocation(location.getKey(), location.getValue());
             }
         } finally {
@@ -290,6 +298,13 @@ public final class TopicFeed {
             if (events.size() < pageSize) {
                 return;
             }
+        }
+    }
+
+    /** A reliable event beyond the cursor was signalled since this drain pass started. Caller holds the lock. */
+    private boolean orderedEventsPending() {
+        synchronized (pendingLock) {
+            return pendingOrderedSeq > cursor; // false again once the catch-up moved the cursor past it
         }
     }
 

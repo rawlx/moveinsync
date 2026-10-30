@@ -84,15 +84,62 @@ class NotificationFanoutIT {
     }
 
     private Gateway startGateway() {
+        return startGateway(CHANNEL);
+    }
+
+    /** A gateway subscribed to the given notification channels, each on its own Pub/Sub connection. */
+    private Gateway startGateway(String... channels) {
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         SubscriptionRegistry registry = new SubscriptionRegistry(store, 1000, executor, 512, 64);
         GatewayFanout fanout = new GatewayFanout(registry, Duration.ofHours(1));
-        RedisNotificationSubscriber subscriber = new RedisNotificationSubscriber(client, CHANNEL, fanout);
-        subscriber.start();
         closeables.add(executor::shutdownNow);
         closeables.add(fanout);
-        closeables.add(subscriber);
+        for (String channel : channels) {
+            RedisNotificationSubscriber subscriber = new RedisNotificationSubscriber(client, channel, fanout);
+            subscriber.start();
+            closeables.add(subscriber);
+        }
         return new Gateway(registry, fanout);
+    }
+
+    /** A publisher with the SOS lane: its own store connection and the priority notification channel. */
+    private EventPublisher lanedPublisher() {
+        RedisNotificationPublisher notifications = new RedisNotificationPublisher(client, CHANNEL);
+        RedisNotificationPublisher priority = new RedisNotificationPublisher(client,
+                RedisNotificationPublisher.priorityChannel(CHANNEL));
+        RedisEventStore priorityStore = new RedisEventStore(client, RETENTION);
+        closeables.add(notifications);
+        closeables.add(priority);
+        closeables.add(priorityStore::close);
+        return new EventPublisher(store, notifications, priorityStore, priority, null);
+    }
+
+    @Test
+    void sosTravelsOnItsOwnChannelAndStillArrivesAfterTheEarlierStatusOfItsTopic() {
+        // Gateway P hears only the SOS channel: anything it delivers was triggered by an SOS notification.
+        Gateway onlySos = startGateway(RedisNotificationPublisher.priorityChannel(CHANNEL));
+        Gateway both = startGateway(CHANNEL, RedisNotificationPublisher.priorityChannel(CHANNEL));
+        RecordingTransport sosOnly = RecordingTransport.open();
+        RecordingTransport employee = RecordingTransport.open();
+        RecordingTransport otherTenant = RecordingTransport.open();
+        onlySos.registry().subscribe(onlySos.registry().open("p", "acme", sosOnly), TRIP);
+        both.registry().subscribe(both.registry().open("emp", "acme", employee), TRIP);
+        both.registry().subscribe(both.registry().open("other", "globex", otherTenant), TRIP);
+        EventPublisher laned = lanedPublisher();
+
+        laned.publish(status("s1"), ALL);    // default channel: gateway P does not hear it
+        laned.publish(location("l1", "C-1", 1.0), List.of(CAB, OFFICE));
+        laned.publish(sos("sos"), ALL);      // SOS channel: P catches its trip feed up from the stream
+        await().atMost(WAIT).until(() -> sosOnly.sent().size() == 2);
+        assertThat(sosOnly.eventIds()).as("the earlier status first, then the SOS").containsExactly("s1", "sos");
+        assertThat(sosOnly.seqs()).isSorted().doesNotHaveDuplicates();
+
+        laned.publish(status("s2"), ALL);    // default channel again: not heard by P
+        await().atMost(WAIT).until(() -> employee.sent().size() == 3);
+        assertThat(employee.eventIds()).containsExactly("s1", "sos", "s2");
+        assertThat(employee.seqs()).isSorted().doesNotHaveDuplicates();
+        await().during(Duration.ofMillis(500)).atMost(WAIT).until(() -> sosOnly.sent().size() == 2);
+        assertThat(otherTenant.sent()).as("tenant isolation").isEmpty();
     }
 
     @Test

@@ -16,26 +16,29 @@ final class NotificationSubscriberLifecycle implements SmartLifecycle {
     private static final Duration RETRY_DELAY = Duration.ofSeconds(1);
 
     private final RedisNotificationSubscriber subscriber;
+    private final String channel;
     private volatile Thread starter;
     private volatile boolean running;
 
-    NotificationSubscriberLifecycle(RedisNotificationSubscriber subscriber) {
+    NotificationSubscriberLifecycle(RedisNotificationSubscriber subscriber, String channel) {
         this.subscriber = subscriber;
+        this.channel = channel;
     }
 
     @Override
     public void start() {
         running = true;
-        starter = Thread.ofVirtual().name("notification-subscriber-start").start(() -> {
+        starter = Thread.ofVirtual().name("notification-subscriber-start-" + channel).start(() -> {
             boolean warned = false;
             while (running) {
                 try {
                     subscriber.start();
-                    log.info("Subscribed to event notifications");
+                    log.info("Subscribed to event notifications on {}", channel);
                     return;
                 } catch (RuntimeException e) {
                     if (!warned) {
-                        log.warn("Cannot subscribe to event notifications yet; retrying every {}", RETRY_DELAY);
+                        log.warn("Cannot subscribe to event notifications on {} yet; retrying every {}", channel,
+                                RETRY_DELAY);
                         warned = true;
                     }
                 }

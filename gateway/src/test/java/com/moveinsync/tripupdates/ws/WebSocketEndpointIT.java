@@ -7,6 +7,7 @@ import static org.awaitility.Awaitility.await;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.moveinsync.tripupdates.domain.DelayPayload;
 import com.moveinsync.tripupdates.domain.GeoPoint;
+import com.moveinsync.tripupdates.domain.LocationPayload;
 import com.moveinsync.tripupdates.domain.SosPayload;
 import com.moveinsync.tripupdates.domain.SosRaiser;
 import com.moveinsync.tripupdates.domain.StatusPayload;
@@ -17,6 +18,8 @@ import com.moveinsync.tripupdates.domain.TripStatus;
 import com.moveinsync.tripupdates.gateway.SubscriptionRegistry;
 import com.moveinsync.tripupdates.publish.EventPublisher;
 import com.moveinsync.tripupdates.store.AppendResult;
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.api.StatefulRedisConnection;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -291,6 +294,84 @@ class WebSocketEndpointIT {
         assertThat(replay.subList(0, 3)).extracting(e -> e.get("seq").asLong()).containsExactlyElementsOf(missed);
         assertThat(replay.get(3).get("type").asText()).isEqualTo("RESUME_COMPLETE");
         again.close();
+    }
+
+    @Test
+    void phoneBackFromALiftGetsTheMissedStatusChangesInOrderAndOnlyTheLatestLocation() throws Exception {
+        try {
+            liftScenario();
+        } finally {
+            // The scenario leaves a latest location on T-1's topics, which every later SUBSCRIBE would correctly
+            // receive; remove it so the other tests of this class keep their location-free view.
+            RedisClient cleanup = RedisClient.create("redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
+            try (StatefulRedisConnection<String, String> connection = cleanup.connect()) {
+                connection.sync().del("t:acme:loc:trip:T-1", "t:acme:loc:cab:C-1", "t:acme:loc:office:O-1");
+            } finally {
+                cleanup.shutdown();
+            }
+        }
+    }
+
+    private void liftScenario() throws Exception {
+        WsTestClient phone = WsTestClient.connect(port, "dev-acme-emp-1");
+        phone.send(subscribe("m1", "trip:T-1"));
+        assertThat(phone.next().get("type").asText()).isEqualTo("SUBSCRIBED");
+        WsTestClient otherTenant = WsTestClient.connect(port, "dev-globex-emp-1"); // same trip id, other tenant
+        otherTenant.send(subscribe("g1", "trip:T-1"));
+        assertThat(otherTenant.next().get("type").asText()).isEqualTo("SUBSCRIBED");
+        publishAcmeT1();
+        long lastProcessed = phone.next().get("seq").asLong();
+        phone.abort(); // the lift: connection lost without a close handshake
+
+        List<Long> missedStatus = new ArrayList<>();
+        String latestLocationId = null;
+        long latestLocationSeq = 0;
+        TripStatus[] changes = {TripStatus.ARRIVED, TripStatus.PICKED_UP, TripStatus.DROPPED};
+        for (int i = 0; i < changes.length; i++) {
+            for (int fix = 0; fix < 2; fix++) { // the cab keeps reporting its position meanwhile
+                TripEvent location = new TripEvent("loc-" + IDS.incrementAndGet(), "acme", "T-1", "C-1",
+                        Instant.now(), new LocationPayload(new GeoPoint(12.9 + i * 0.01 + fix * 0.001, 77.6), null,
+                                null));
+                latestLocationSeq = publisher.publish(location, T1_TOPICS).appended().events().get(0).seq();
+                latestLocationId = location.eventId();
+            }
+            missedStatus.add(publisher.publish(new TripEvent("e-" + IDS.incrementAndGet(), "acme", "T-1", "C-1",
+                    Instant.now(), new StatusPayload(changes[i])), T1_TOPICS).appended().events().get(0).seq());
+        }
+        publisher.publish(status("globex", "T-1", "C-1"),
+                List.of(TopicId.trip("T-1"), TopicId.cab("C-1"), TopicId.office("O-1")));
+
+        WsTestClient again = WsTestClient.connect(port, "dev-acme-emp-1");
+        again.send("{\"type\":\"RESUME\",\"id\":\"r1\",\"topic\":\"trip:T-1\",\"lastSeq\":" + lastProcessed
+                + "}");
+        List<JsonNode> resumed = again.next(5);
+        assertThat(resumed.subList(0, 3)).extracting(e -> e.at("/event/type").asText())
+                .containsExactly("STATUS", "STATUS", "STATUS");
+        assertThat(resumed.subList(0, 3)).extracting(e -> e.at("/event/data/status").asText())
+                .containsExactly("ARRIVED", "PICKED_UP", "DROPPED");
+        assertThat(resumed.subList(0, 3)).extracting(e -> e.get("seq").asLong())
+                .containsExactlyElementsOf(missedStatus);
+        assertThat(resumed.get(3).get("type").asText()).isEqualTo("RESUME_COMPLETE");
+        assertThat(resumed.get(4).at("/event/type").asText()).isEqualTo("LOCATION");
+        assertThat(resumed.get(4).at("/event/eventId").asText()).as("only the latest of six locations")
+                .isEqualTo(latestLocationId);
+        assertThat(resumed.get(4).get("seq").asLong()).isEqualTo(latestLocationSeq);
+        assertThat(resumed).allSatisfy(e -> {
+            if (e.has("event")) {
+                assertThat(e.at("/event/tenantId").asText()).isEqualTo("acme");
+            }
+        });
+        assertThat(again.poll(500)).as("no older locations and no duplicates").isNull();
+
+        long live = publishAcmeT1().events().get(0).seq();
+        JsonNode next = again.next();
+        assertThat(next.get("seq").asLong()).isEqualTo(live).isGreaterThan(latestLocationSeq);
+
+        JsonNode foreign = otherTenant.next();
+        assertThat(foreign.at("/event/tenantId").asText()).isEqualTo("globex");
+        assertThat(otherTenant.poll(300)).as("the other tenant sees only its own event").isNull();
+        again.close();
+        otherTenant.close();
     }
 
     @Test

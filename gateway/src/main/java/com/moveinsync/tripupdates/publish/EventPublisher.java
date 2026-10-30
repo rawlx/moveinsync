@@ -17,6 +17,11 @@ import org.slf4j.LoggerFactory;
 /**
  * Publishes an event: durable append first, notification second. The notification is sent only after the append
  * succeeded, and a failed notification never causes a second append.
+ *
+ * <p>Priority lane: when created with a separate store and notification publisher for priority events, SOS events
+ * are appended and notified through them, so an SOS never queues behind location traffic on the shared Redis
+ * connections or notification channel. Ordering is unaffected: sequence numbers are assigned atomically by the store
+ * per topic, and gateways deliver from the stream in sequence order whatever channel announced the event.
  */
 public final class EventPublisher {
 
@@ -24,6 +29,8 @@ public final class EventPublisher {
 
     private final EventStore store;
     private final NotificationPublisher notifications;
+    private final EventStore priorityStore;
+    private final NotificationPublisher priorityNotifications;
     private final EventRouter router;
     private final AtomicLong notificationFailures = new AtomicLong();
 
@@ -33,8 +40,19 @@ public final class EventPublisher {
     }
 
     public EventPublisher(EventStore store, NotificationPublisher notifications, EventRouter router) {
+        this(store, notifications, store, notifications, router);
+    }
+
+    /**
+     * A publisher with a priority lane: priority events (SOS) use {@code priorityStore} and
+     * {@code priorityNotifications}, which must be backed by their own connections and notification channel.
+     */
+    public EventPublisher(EventStore store, NotificationPublisher notifications, EventStore priorityStore,
+            NotificationPublisher priorityNotifications, EventRouter router) {
         this.store = store;
         this.notifications = notifications;
+        this.priorityStore = priorityStore;
+        this.priorityNotifications = priorityNotifications;
         this.router = router;
     }
 
@@ -58,7 +76,7 @@ public final class EventPublisher {
      * (idempotent retry) is re-notified, which repairs a notification lost by the original attempt.
      */
     public PublishOutcome publish(TripEvent event, List<TopicId> topics) {
-        AppendResult appended = store.append(event, topics);
+        AppendResult appended = (event.type().isPriority() ? priorityStore : store).append(event, topics);
         return new PublishOutcome(appended, notify(appended));
     }
 
@@ -75,7 +93,7 @@ public final class EventPublisher {
     private boolean notify(AppendResult appended) {
         EventNotification notification = EventNotification.of(appended);
         try {
-            notifications.publish(notification);
+            (notification.type().isPriority() ? priorityNotifications : notifications).publish(notification);
             return true;
         } catch (NotificationPublishException e) {
             notificationFailures.incrementAndGet();
