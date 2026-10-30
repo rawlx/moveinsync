@@ -32,6 +32,8 @@ public record LoadReport(
         Double firstDisconnectAtSeconds,
         Double recoveryWindowSeconds,
         List<GatewayHealth.Transition> gatewayTransitions,
+        FailbackResult failback,
+        Map<Integer, Map<String, Long>> perGateway,
         Map<String, Object> phases,
         List<Map<String, Object>> timeline) {
 
@@ -52,6 +54,16 @@ public record LoadReport(
     }
 
     public record Check(String target, String measured, boolean met) {
+    }
+
+    /**
+     * Clients connected to a restored gateway after its failure. Times are seconds since the test start;
+     * {@code allSubscribedAtSeconds} is null if not every late client subscribed before the timeout.
+     */
+    public record FailbackResult(int gateway, int requested, int launched, int subscribed, int onRestoredGateway,
+            long reconnected, Double eligibleAtSeconds, Double launchedAtSeconds, Double allSubscribedAtSeconds,
+            long expectedReliable, long receivedReliable, long missingReliable, long unexpectedReliable,
+            long duplicates, long locations, long tenantViolations) {
     }
 
     /** Non-probe clients confirmed subscribed at the CONNECTED phase. */
@@ -79,12 +91,25 @@ public record LoadReport(
                         && sos.expectedDeliveries() > 0));
         checks.add(new Check("SOS p99 < 2 s (live deliveries)", sos.live().p99Ms() + " ms over "
                 + sos.live().count() + " samples", sos.live().count() > 0 && sos.live().p99Ms() < 2_000));
-        long violations = clients.values().stream().mapToLong(k -> k.tenantViolations).sum();
+        long violations = clients.values().stream().mapToLong(k -> k.tenantViolations).sum()
+                + (failback == null ? 0 : failback.tenantViolations());
         checks.add(new Check("no cross-tenant event delivered", violations + " violations", violations == 0));
         long forbidden = probeAnswers.getOrDefault("FORBIDDEN", 0L);
         int probes = clients.get(ClientPlan.Kind.PROBE).planned;
         checks.add(new Check("unauthorised subscriptions refused", forbidden + " of " + probes + " FORBIDDEN",
                 forbidden == probes));
+        if (failback != null) {
+            checks.add(new Check("restored gateway accepts new subscriptions",
+                    failback.subscribed() + " of " + failback.requested() + " late clients subscribed, "
+                            + failback.onRestoredGateway() + " on gateway " + failback.gateway(),
+                    failback.requested() > 0 && failback.subscribed() == failback.requested()
+                            && failback.onRestoredGateway() == failback.requested()));
+            checks.add(new Check("late clients: no reliable event lost",
+                    failback.missingReliable() + " missing, " + failback.unexpectedReliable() + " unexpected of "
+                            + failback.expectedReliable() + " expected",
+                    failback.expectedReliable() > 0 && failback.missingReliable() == 0
+                            && failback.unexpectedReliable() == 0));
+        }
         return checks;
     }
 
@@ -144,6 +169,12 @@ public record LoadReport(
         out.append(String.format("first disconnect at %ss; recovery window %ss; disconnect reasons %s%n",
                 firstDisconnectAtSeconds, recoveryWindowSeconds, disconnectReasons));
         out.append("gateway health transitions (load generator's view): ").append(gatewayTransitions).append('\n');
+        out.append("per gateway (index): ").append(perGateway).append('\n');
+        sos.byGateway().forEach((gateway, s) -> out.append("  SOS received via gateway ").append(gateway)
+                .append(": ").append(format(s)).append('\n'));
+        if (failback != null) {
+            out.append("failback: ").append(failback).append('\n');
+        }
         out.append("probe answers: ").append(probeAnswers).append("; errors: ").append(errors).append('\n');
         out.append("checks:\n");
         for (Check check : checks()) {

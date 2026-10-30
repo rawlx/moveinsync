@@ -58,7 +58,7 @@ class LoadHarnessIT {
                 44, 2, 2, 1, 4,
                 200, 50, 2,
                 Duration.ofSeconds(30), Duration.ofSeconds(2), Duration.ofSeconds(8), Duration.ofSeconds(6),
-                Duration.ofMillis(400), 2, 0.3, 4.0, 3, Duration.ofSeconds(2), 7L);
+                Duration.ofMillis(400), 2, 0.3, 4.0, 3, Duration.ofSeconds(2), 7L, 0, 0, Duration.ofSeconds(30));
 
         LoadReport report = new LoadTest(config).run(
                 () -> registry.sessions().forEach(session -> session.close(CloseReason.SHUTDOWN)),

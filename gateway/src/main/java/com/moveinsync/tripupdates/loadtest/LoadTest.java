@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
@@ -51,6 +52,11 @@ public final class LoadTest {
     private final LoadTestConfig config;
     private final SyntheticFleet fleet;
     private final List<LoadClient> clients = new ArrayList<>();
+    /** Clients launched against the restored gateway after a failure (see {@link #failback()}). */
+    private final List<LoadClient> lateClients = new CopyOnWriteArrayList<>();
+    private volatile Double lateEligibleAtSeconds;
+    private volatile Double lateLaunchedAtSeconds;
+    private volatile Double lateAllSubscribedAtSeconds;
     private final HttpClient[] httpClients;
     private final ExecutorService callbackExecutor;
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
@@ -129,7 +135,13 @@ public final class LoadTest {
             if (midRunHook != null) {
                 scheduler.schedule(midRunHook, hookAfter.toMillis(), TimeUnit.MILLISECONDS);
             }
+            Thread failback = config.lateClients() > 0
+                    ? Thread.ofPlatform().name("failback").start(this::failback) : null;
             sleep(config.duration());
+            if (failback != null) {
+                failback.interrupt();
+                failback.join(10_000);
+            }
             publishing = false;
             for (Thread thread : publishers) {
                 thread.join(30_000);
@@ -193,6 +205,67 @@ public final class LoadTest {
         if (pendingFirstOutcome.remove(client.spec().id())) {
             connectPermits.release();
         }
+    }
+
+    /**
+     * Failback: waits until the load generator has seen the configured gateway fail (a DOWN transition) and become
+     * eligible again (an UP transition after consecutive successful readiness probes), then connects the late
+     * clients to that gateway only. Existing clients are not moved: redistribution is not part of the design.
+     */
+    private void failback() {
+        int gateway = config.lateGateway();
+        long deadline = System.nanoTime() + config.lateTimeout().toNanos();
+        try {
+            while (!restoredAfterFailure(gateway)) {
+                if (System.nanoTime() > deadline || !publishing) {
+                    log("failback: gateway %d was not seen failing and recovering; late clients not launched",
+                            gateway);
+                    return;
+                }
+                Thread.sleep(250);
+            }
+            lateEligibleAtSeconds = seconds(System.nanoTime() - startNanos);
+            List<ClientPlan.ClientSpec> specs = ClientPlan.buildLate(fleet, config.lateClients(), gateway,
+                    clients.size());
+            lateLaunchedAtSeconds = seconds(System.nanoTime() - startNanos);
+            log("failback: gateway %d eligible at %.2fs, launching %d late clients", gateway, lateEligibleAtSeconds,
+                    specs.size());
+            for (ClientPlan.ClientSpec spec : specs) {
+                LoadClient client = new LoadClient(spec, this);
+                lateClients.add(client);
+                if (spec.kind() == ClientPlan.Kind.SECURITY_SOS) {
+                    securityByTopic.computeIfAbsent(spec.tenantTopic(), t -> new CopyOnWriteArrayList<>())
+                            .add(client);
+                }
+                client.connect();
+                Thread.sleep(10); // about 100 connects per second
+            }
+            while (System.nanoTime() < deadline && publishing) {
+                if (lateClients.stream().allMatch(LoadClient::everSubscribed)) {
+                    lateAllSubscribedAtSeconds = seconds(System.nanoTime() - startNanos);
+                    log("failback: all %d late clients subscribed at %.2fs", lateClients.size(),
+                            lateAllSubscribedAtSeconds);
+                    return;
+                }
+                Thread.sleep(100);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private boolean restoredAfterFailure(int gateway) {
+        boolean down = false;
+        for (GatewayHealth.Transition transition : health.transitions()) {
+            if (transition.gateway() == gateway) {
+                if ("DOWN".equals(transition.state())) {
+                    down = true;
+                } else if (down && "UP".equals(transition.state())) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // ---- publishing ---------------------------------------------------------------------------------------------
@@ -462,6 +535,27 @@ public final class LoadTest {
             }
         }
         Map<String, Long> published = new LinkedHashMap<>();
+        LoadReport.FailbackResult failbackResult = config.lateClients() == 0 ? null : failbackResult();
+        Map<Integer, Map<String, Long>> perGateway = new TreeMap<>();
+        for (int g = 0; g < config.gateways().size(); g++) {
+            Map<String, Long> row = new LinkedHashMap<>();
+            row.put("initialClients", 0L);
+            row.put("initialClientsReconnected", 0L);
+            row.put("finalClients", 0L);
+            perGateway.put(g, row);
+        }
+        for (LoadClient client : allClients()) {
+            if (client.spec().kind() == ClientPlan.Kind.PROBE || !client.everSubscribed()) {
+                continue;
+            }
+            if (!lateClients.contains(client)) {
+                perGateway.get(client.spec().gateway()).merge("initialClients", 1L, Long::sum);
+                if (client.reconnects() > 0) {
+                    perGateway.get(client.spec().gateway()).merge("initialClientsReconnected", 1L, Long::sum);
+                }
+            }
+            perGateway.get(client.gateway()).merge("finalClients", 1L, Long::sum);
+        }
         publishedByType.forEach((type, count) -> published.put(type.name(), count.sum()));
         long first = firstDisconnectNanos.get();
         long last = lastRecoveryNanos.get();
@@ -472,7 +566,49 @@ public final class LoadTest {
                 sos.summary(), reconnects.summary(),
                 first == 0 ? null : seconds(first - startNanos),
                 first == 0 || last < first ? null : seconds(last - first),
-                health.transitions(), phases, timeline);
+                health.transitions(), failbackResult, perGateway, phases, timeline);
+    }
+
+    private LoadReport.FailbackResult failbackResult() {
+        int planned = lateClients.size();
+        int subscribed = 0;
+        int onGateway = 0;
+        long expected = 0;
+        long received = 0;
+        long missing = 0;
+        long unexpected = 0;
+        long duplicates = 0;
+        long locations = 0;
+        long violations = 0;
+        long reconnected = 0;
+        for (LoadClient client : lateClients) {
+            if (!client.everSubscribed()) {
+                continue;
+            }
+            subscribed++;
+            if (client.gateway() == config.lateGateway()) {
+                onGateway++;
+            }
+            reconnected += client.reconnects() > 0 ? 1 : 0;
+            duplicates += client.duplicates();
+            locations += client.locations();
+            violations += client.tenantViolations();
+            SequenceVerifier.Result verified = SequenceVerifier.verify(client.startSeq(),
+                    publishLog.reliable(client.spec().tenantTopic()), client.receivedSeqs());
+            expected += verified.expected();
+            received += verified.received();
+            missing += verified.missing();
+            unexpected += verified.unexpected();
+        }
+        return new LoadReport.FailbackResult(config.lateGateway(), config.lateClients(), planned, subscribed,
+                onGateway, reconnected, lateEligibleAtSeconds, lateLaunchedAtSeconds, lateAllSubscribedAtSeconds,
+                expected, received, missing, unexpected, duplicates, locations, violations);
+    }
+
+    private List<LoadClient> allClients() {
+        List<LoadClient> all = new ArrayList<>(clients);
+        all.addAll(lateClients);
+        return all;
     }
 
     private static Map<String, Long> sums(Map<String, LongAdder> counters) {
@@ -487,18 +623,18 @@ public final class LoadTest {
     }
 
     private int countSubscribed() {
-        return (int) clients.stream().filter(c -> c.spec().kind() != ClientPlan.Kind.PROBE)
+        return (int) allClients().stream().filter(c -> c.spec().kind() != ClientPlan.Kind.PROBE)
                 .filter(c -> c.state() == LoadClient.State.SUBSCRIBED).count();
     }
 
     private int countState(LoadClient.State state) {
-        return (int) clients.stream().filter(c -> c.state() == state).count();
+        return (int) allClients().stream().filter(c -> c.state() == state).count();
     }
 
     private void shutdown() {
         stopping = true;
         publishing = false;
-        for (LoadClient client : clients) {
+        for (LoadClient client : allClients()) {
             try {
                 client.close();
             } catch (RuntimeException ignored) {

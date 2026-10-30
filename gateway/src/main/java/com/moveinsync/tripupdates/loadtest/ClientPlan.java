@@ -87,6 +87,39 @@ final class ClientPlan {
         return List.copyOf(plan);
     }
 
+    /**
+     * Clients that join after a gateway failure, all pinned to {@code gateway} (the restored replica), with ids
+     * starting at {@code firstId}. Per office, in a repeating block of ten: one security user (SOS topic), two
+     * office admins, two cab watchers and five employees, so every topic kind is exercised on the restored gateway.
+     */
+    static List<ClientSpec> buildLate(SyntheticFleet fleet, int count, int gateway, int firstId) {
+        Map<String, List<TripSimulator.FleetTrip>> tripsByOffice = new LinkedHashMap<>();
+        for (TripSimulator.FleetTrip trip : fleet.trips()) {
+            tripsByOffice.computeIfAbsent(trip.tenantId() + "/" + trip.officeId(), key -> new ArrayList<>()).add(trip);
+        }
+        List<List<TripSimulator.FleetTrip>> offices = new ArrayList<>(tripsByOffice.values());
+        List<ClientSpec> late = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            List<TripSimulator.FleetTrip> officeTrips = offices.get((i / 10) % offices.size());
+            TripSimulator.FleetTrip trip = officeTrips.get((i / (10 * offices.size())) % officeTrips.size());
+            String tenant = trip.tenantId();
+            String office = trip.officeId();
+            int id = firstId + i;
+            ClientSpec spec = switch (i % 10) {
+                case 0 -> new ClientSpec(id, Kind.SECURITY_SOS, SyntheticFleet.securityToken(tenant, office), tenant,
+                        TopicId.sos(office), gateway);
+                case 1, 2 -> new ClientSpec(id, Kind.ADMIN_OFFICE, SyntheticFleet.adminToken(tenant, office), tenant,
+                        TopicId.office(office), gateway);
+                case 3, 4 -> new ClientSpec(id, Kind.ADMIN_CAB, SyntheticFleet.adminToken(tenant, office), tenant,
+                        TopicId.cab(trip.cabId()), gateway);
+                default -> new ClientSpec(id, Kind.EMPLOYEE_TRIP, fleet.employeeToken(trip, 1), tenant,
+                        TopicId.trip(trip.tripId()), gateway);
+            };
+            late.add(spec);
+        }
+        return List.copyOf(late);
+    }
+
     private static void add(List<ClientSpec> plan, Kind kind, String token, String tenant, TopicId topic,
             int gateways) {
         int id = plan.size();

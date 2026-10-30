@@ -3,11 +3,14 @@ Load test with gateway-failure injection against the Docker Compose stack.
 
   powershell -ExecutionPolicy Bypass -File deploy\loadtest\run-loadtest.ps1 [-Clients 10000] [-DurationSeconds 180]
       [-KillAfterSeconds 60] [-KillService gateway-2] [-SosPerSecond 2] [-NoKill] [-NoBuild]
+      [-RestoreAfterSeconds 30 -LateClients 300]
 
 Steps: (re)start the stack and wait for healthy replicas; snapshot docker stats; run the loadgen container (profile
 "loadtest"); snapshot at its CONNECTED and STEADY phase markers; kill one gateway container KillAfterSeconds after
-STEADY; snapshot during recovery; wait for the loadgen to finish; collect logs. The finally block always stops the
-loadgen and restores the killed replica, even when the run fails or is interrupted.
+STEADY; snapshot during recovery; optionally restore the killed gateway RestoreAfterSeconds after the kill, while
+traffic continues, so the loadgen's LateClients connect to it (failback); wait for the loadgen to finish; collect
+logs. Redis Pub/Sub subscriber counts of notify:events are recorded before the kill, after it and after the restore.
+The finally block always stops the loadgen and restores the killed replica, even when the run fails or is interrupted.
 Results: loadtest-results\<run id>\ (summary.txt, result.json from the loadgen; stats-*.txt, events.txt, logs).
 #>
 param(
@@ -18,7 +21,9 @@ param(
     [double]$SosPerSecond = 2,
     [int]$ConnectsPerSecond = 400,
     [switch]$NoKill,
-    [switch]$NoBuild
+    [switch]$NoBuild,
+    [int]$RestoreAfterSeconds = -1,
+    [int]$LateClients = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,6 +45,11 @@ function Stats([string]$label) {
     docker stats --no-stream --format "{{.Name}}`t{{.CPUPerc}}`t{{.MemUsage}}`t{{.MemPerc}}`t{{.NetIO}}`t{{.PIDs}}" |
         Out-File -Encoding utf8 $file
     Note "docker stats snapshot '$label' -> $file"
+}
+
+function PubSub([string]$label) {
+    $count = (docker compose exec -T redis redis-cli PUBSUB NUMSUB notify:events | Select-Object -Last 1)
+    Note "PUBSUB NUMSUB notify:events ($label) = $count"
 }
 
 function WaitForLog([string]$container, [string]$marker, [int]$timeoutSeconds) {
@@ -69,6 +79,8 @@ try {
     $env:LOADTEST_DURATION_S = "$DurationSeconds"
     $env:LOADTEST_SOS_PER_SECOND = "$SosPerSecond"
     $env:LOADTEST_CONNECTS_PER_SECOND = "$ConnectsPerSecond"
+    $env:LOADTEST_LATE_CLIENTS = "$LateClients"
+    $env:LOADTEST_LATE_GATEWAY = "$([int]($KillService -replace '\D', '') - 1)"
     docker compose --profile loadtest run -d --name $loadgen loadgen | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "loadgen did not start" }
     Note "loadgen started ($loadgen)"
@@ -79,6 +91,7 @@ try {
     if (-not (WaitForLog $loadgen "LOADTEST PHASE STEADY" 300)) { throw "loadgen never reached STEADY" }
     Note "loadgen STEADY"
     Stats "steady"
+    PubSub "before kill"
 
     if (-not $NoKill) {
         Start-Sleep -Seconds $KillAfterSeconds
@@ -91,11 +104,25 @@ try {
         Stats "recovery-5s"
         Start-Sleep -Seconds 10
         Stats "recovery-15s"
+        PubSub "after kill"
+        if ($RestoreAfterSeconds -ge 0) {
+            Start-Sleep -Seconds ([Math]::Max(0, $RestoreAfterSeconds - 15))
+            Note "RESTORE $KillService"
+            docker compose up -d --wait $KillService | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "$KillService did not become healthy after restore" }
+            $killed = $null
+            Note "restored ${KillService}: $(docker compose ps --format '{{.Service}} {{.Status}}' $KillService)"
+            PubSub "after restore"
+            Start-Sleep -Seconds 20
+            Stats "after-restore-20s"
+            PubSub "after restore +20s"
+        }
     }
 
     $exit = docker wait $loadgen
     Note "loadgen exited with $exit"
     Stats "end"
+    PubSub "end"
 }
 finally {
     docker logs $loadgen *> (Join-Path $results "loadgen.log")

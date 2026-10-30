@@ -203,5 +203,13 @@ class LoadTestMeasurementTest {
         assertThat(custom.clients()).isEqualTo(40);
         assertThat(custom.gateways()).containsExactly("ws://a/ws", "ws://b/ws");
         assertThat(custom.sosPerSecond()).isEqualTo(0.5);
+        assertThat(defaults.lateClients()).as("failback is opt-in").isZero();
+        LoadTestConfig late = LoadTestConfig.from(java.util.Map.of("LOADTEST_LATE_CLIENTS", "300",
+                "LOADTEST_LATE_GATEWAY", "1"));
+        assertThat(late.lateClients()).isEqualTo(300);
+        assertThat(late.lateGateway()).isEqualTo(1);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> LoadTestConfig.from(java.util.Map.of(
+                "LOADTEST_LATE_CLIENTS", "10", "LOADTEST_LATE_GATEWAY", "3")))
+                .as("late gateway must exist").isInstanceOf(IllegalArgumentException.class);
     }
 }

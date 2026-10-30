@@ -63,6 +63,35 @@ class ClientPlanTest {
     }
 
     @Test
+    void lateClientsAreAuthorisedPinnedToTheRestoredGatewayAndCoverEveryTopicKind() {
+        SyntheticFleet fleet = SyntheticFleet.generate(new SyntheticFleet.Spec(2, 10, 100, 4));
+        List<ClientPlan.ClientSpec> late = ClientPlan.buildLate(fleet, 300, 1, 10_100);
+        TopicAuthorizer authorizer = new TopicAuthorizer(fleet.directory());
+        DevTokenAuthenticator authenticator = new DevTokenAuthenticator(fleet.identities());
+
+        assertThat(late).hasSize(300);
+        assertThat(late).extracting(ClientPlan.ClientSpec::id).doesNotHaveDuplicates()
+                .allSatisfy(id -> assertThat(id).isGreaterThanOrEqualTo(10_100));
+        assertThat(late).extracting(ClientPlan.ClientSpec::gateway).containsOnly(1);
+        Map<ClientPlan.Kind, Long> kinds = late.stream()
+                .collect(Collectors.groupingBy(ClientPlan.ClientSpec::kind, Collectors.counting()));
+        assertThat(kinds).containsEntry(ClientPlan.Kind.SECURITY_SOS, 30L)
+                .containsEntry(ClientPlan.Kind.ADMIN_OFFICE, 60L)
+                .containsEntry(ClientPlan.Kind.ADMIN_CAB, 60L)
+                .containsEntry(ClientPlan.Kind.EMPLOYEE_TRIP, 150L)
+                .doesNotContainKey(ClientPlan.Kind.PROBE);
+        // Every office of both tenants gets at least one late SOS subscriber.
+        assertThat(late.stream().filter(s -> s.kind() == ClientPlan.Kind.SECURITY_SOS)
+                .map(ClientPlan.ClientSpec::tenantTopic).distinct().count()).isEqualTo(20);
+        for (ClientPlan.ClientSpec spec : late) {
+            Identity identity = authenticator.authenticate(spec.token()).orElseThrow();
+            assertThat(identity.tenantId()).isEqualTo(spec.tenantId());
+            assertThat(authorizer.mayRead(identity, spec.topic())).as("%s %s", spec.kind(), spec.topic()).isTrue();
+        }
+        assertThat(ClientPlan.buildLate(fleet, 300, 1, 10_100)).as("deterministic").isEqualTo(late);
+    }
+
+    @Test
     void planRejectsTooFewClientsForTheFixedRoles() {
         SyntheticFleet fleet = SyntheticFleet.generate(new SyntheticFleet.Spec(2, 10, 100, 4));
         assertThatThrownBy(() -> ClientPlan.build(fleet, config(100))).isInstanceOf(IllegalArgumentException.class);

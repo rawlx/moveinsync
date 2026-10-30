@@ -4,7 +4,9 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -37,7 +39,8 @@ final class SosTracker {
 
     record Summary(long published, long publishFailures, long expectedDeliveries, long delivered, long missing,
             long duplicateDeliveries, LatencyRecorder.Summary live, LatencyRecorder.Summary recovered,
-            LatencyRecorder.Summary all, List<SlowDelivery> slowDeliveries) {
+            LatencyRecorder.Summary all, List<SlowDelivery> slowDeliveries,
+            Map<Integer, LatencyRecorder.Summary> byGateway) {
     }
 
     private record Sent(long nanos, int expectedRecipients) {
@@ -52,11 +55,14 @@ final class SosTracker {
     private final LatencyRecorder recovered;
     private final LatencyRecorder all;
     private final List<SlowDelivery> slow = new ArrayList<>();
+    private final ConcurrentHashMap<Integer, LatencyRecorder> byGateway = new ConcurrentHashMap<>();
+    private final long targetMillis;
     private final AtomicLong publishFailures = new AtomicLong();
     private final AtomicLong duplicates = new AtomicLong();
 
     SosTracker(long targetMillis, long anchorNanos, Instant anchorUtc) {
         this.targetNanos = targetMillis * 1_000_000;
+        this.targetMillis = targetMillis;
         this.anchorNanos = anchorNanos;
         this.anchorUtc = anchorUtc;
         live = new LatencyRecorder(targetMillis);
@@ -86,6 +92,7 @@ final class SosTracker {
         long latency = nanos - original.nanos();
         (recovering ? recovered : live).record(latency);
         all.record(latency);
+        byGateway.computeIfAbsent(gateway, g -> new LatencyRecorder(targetMillis)).record(latency);
         if (latency > targetNanos) {
             synchronized (slow) {
                 slow.add(new SlowDelivery(eventId, clientId, gateway, seconds(original.nanos()), seconds(nanos),
@@ -109,8 +116,10 @@ final class SosTracker {
             slowCopy = new ArrayList<>(slow);
         }
         slowCopy.sort(Comparator.comparingDouble(SlowDelivery::publishedAtSeconds));
+        Map<Integer, LatencyRecorder.Summary> perGateway = new TreeMap<>();
+        byGateway.forEach((gateway, recorder) -> perGateway.put(gateway, recorder.summary()));
         return new Summary(sent.size(), publishFailures.get(), expected, delivered, missing, duplicates.get(),
-                live.summary(), recovered.summary(), all.summary(), List.copyOf(slowCopy));
+                live.summary(), recovered.summary(), all.summary(), List.copyOf(slowCopy), perGateway);
     }
 
     private double seconds(long nanos) {

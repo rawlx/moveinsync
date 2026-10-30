@@ -38,7 +38,10 @@ public record LoadTestConfig(
         double sosPerSecond,
         int publisherThreads,
         Duration sampleInterval,
-        long seed) {
+        long seed,
+        int lateClients,
+        int lateGateway,
+        Duration lateTimeout) {
 
     public static LoadTestConfig fromEnvironment() {
         return from(System.getenv());
@@ -75,12 +78,16 @@ public record LoadTestConfig(
                 decimal(get, "SOS_PER_SECOND", 2.0),
                 integer(get, "PUBLISHER_THREADS", 8),
                 Duration.ofSeconds(integer(get, "SAMPLE_INTERVAL_S", 5)),
-                Long.parseLong(string(get, "SEED", "20261030")));
+                Long.parseLong(string(get, "SEED", "20261030")),
+                integer(get, "LATE_CLIENTS", 0),
+                integer(get, "LATE_GATEWAY", 1),
+                Duration.ofSeconds(integer(get, "LATE_TIMEOUT_S", 180)));
     }
 
     public LoadTestConfig {
         gateways = List.copyOf(gateways);
-        if (gateways.isEmpty() || clients < 1 || publisherThreads < 1 || httpClients < 1 || sosPerSecond < 0) {
+        if (gateways.isEmpty() || clients < 1 || publisherThreads < 1 || httpClients < 1 || sosPerSecond < 0
+                || lateClients < 0 || (lateClients > 0 && (lateGateway < 0 || lateGateway >= gateways.size()))) {
             throw new IllegalArgumentException("invalid load-test configuration");
         }
     }
