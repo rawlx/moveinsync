@@ -5,6 +5,8 @@ locations, trip status changes, delays and SOS alerts. This project is the publi
 updates: one Spring Boot application run as several identical gateway replicas, with Redis Streams as the durable,
 ordered event history and Redis Pub/Sub to tell gateways that new events exist.
 
+## Video Demo Link: https://www.youtube.com/watch?v=6QiLJkZCQps
+
 ## What it does
 
 | Requirement | How |
