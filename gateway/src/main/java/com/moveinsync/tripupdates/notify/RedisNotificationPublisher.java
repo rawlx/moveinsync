@@ -3,6 +3,7 @@ package com.moveinsync.tripupdates.notify;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisException;
 import io.lettuce.core.api.StatefulRedisConnection;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Publishes notifications with Redis {@code PUBLISH}. Pub/Sub is at-most-once: a gateway that is disconnected
@@ -14,7 +15,7 @@ public final class RedisNotificationPublisher implements NotificationPublisher, 
     private final RedisClient client;
     private final String channel;
     private final NotificationCodec codec = new NotificationCodec();
-    private final Object connectLock = new Object();
+    private final ReentrantLock connectLock = new ReentrantLock();
     private volatile StatefulRedisConnection<String, String> connection;
 
     public RedisNotificationPublisher(RedisClient client, String channel) {
@@ -43,12 +44,15 @@ public final class RedisNotificationPublisher implements NotificationPublisher, 
     private StatefulRedisConnection<String, String> connection() {
         StatefulRedisConnection<String, String> current = connection;
         if (current == null) {
-            synchronized (connectLock) {
+            connectLock.lock(); // not synchronized: connecting blocks, which would pin a virtual thread
+            try {
                 current = connection;
                 if (current == null) {
                     current = client.connect();
                     connection = current;
                 }
+            } finally {
+                connectLock.unlock();
             }
         }
         return current;

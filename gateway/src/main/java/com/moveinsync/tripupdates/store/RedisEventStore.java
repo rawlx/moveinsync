@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Supplier;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * {@link EventStore} on Redis Streams. Each append is one Lua script, so sequence assignment, log append, trimming,
@@ -52,7 +53,7 @@ public final class RedisEventStore implements EventStore, AutoCloseable {
     private final RedisClient client;
     private final AppProperties.Retention retention;
     private final EventJson json = new EventJson();
-    private final Object connectLock = new Object();
+    private final ReentrantLock connectLock = new ReentrantLock();
     private volatile StatefulRedisConnection<String, String> connection;
 
     public RedisEventStore(RedisClient client, AppProperties.Retention retention) {
@@ -283,12 +284,15 @@ public final class RedisEventStore implements EventStore, AutoCloseable {
     private StatefulRedisConnection<String, String> connection() {
         StatefulRedisConnection<String, String> current = connection;
         if (current == null) {
-            synchronized (connectLock) {
+            connectLock.lock(); // not synchronized: connecting blocks, which would pin a virtual thread
+            try {
                 current = connection;
                 if (current == null) {
                     current = client.connect();
                     connection = current;
                 }
+            } finally {
+                connectLock.unlock();
             }
         }
         return current;

@@ -59,7 +59,9 @@ public final class MicrometerGatewayMetrics implements GatewayMetrics {
             lag.put(type, Timer.builder("tripupdates.delivery.lag")
                     .description("Time from publication in Redis until the event was written to the client")
                     .tag("type", type.name())
-                    .publishPercentiles(0.5, 0.99)
+                    // Buckets only; quantiles are computed from them at query time (histogram_quantile). Client-side
+                    // percentiles were dropped: their HdrHistogram recorder synchronises internally and pinned the
+                    // virtual-thread writers that record into it (seen with -Djdk.tracePinnedThreads under load).
                     .publishPercentileHistogram()
                     .minimumExpectedValue(Duration.ofMillis(1))
                     .maximumExpectedValue(Duration.ofSeconds(30))

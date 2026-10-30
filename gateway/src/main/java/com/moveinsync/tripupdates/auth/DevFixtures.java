@@ -45,6 +45,11 @@ public final class DevFixtures {
         return new DevTokenAuthenticator(identitiesByToken);
     }
 
+    /** Dev token → identity. */
+    public Map<String, Identity> identities() {
+        return Map.copyOf(identitiesByToken);
+    }
+
     public InMemoryTopicDirectory directory() {
         return directory;
     }

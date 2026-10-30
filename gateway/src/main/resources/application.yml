@@ -56,6 +56,12 @@ app:
     # dev/dev-fixtures.json and must only be used for local runs and tests.
     mode: ${APP_AUTH_MODE:NONE}
     revalidate-interval: 30s
+    # DEV mode only: generated load-test fleet (sim.SyntheticFleet); all zero = disabled.
+    synthetic-fleet:
+      tenants: 0
+      offices-per-tenant: 0
+      cabs-per-office: 0
+      passengers-per-trip: 0
   websocket:
     max-message-chars: 4096
     allowed-origin-patterns: []

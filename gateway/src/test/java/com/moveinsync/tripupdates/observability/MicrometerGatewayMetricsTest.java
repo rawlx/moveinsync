@@ -15,6 +15,8 @@ import com.moveinsync.tripupdates.gateway.SubscriptionRegistry;
 import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.prometheusmetrics.PrometheusConfig;
+import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 import java.time.Duration;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -22,9 +24,9 @@ import org.junit.jupiter.api.Test;
 
 class MicrometerGatewayMetricsTest {
 
-    /** Our bounded tags, plus {@code phi} which Micrometer adds to published percentiles (values 0.5 and 0.99). */
+    /** Our bounded tags only (no {@code phi}: client-side percentiles are not published). */
     private static final Set<String> ALLOWED_TAG_KEYS =
-            Set.of("type", "reason", "result", "lane", "request", "outcome", "phi");
+            Set.of("type", "reason", "result", "lane", "request", "outcome");
 
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final MicrometerGatewayMetrics metrics = new MicrometerGatewayMetrics(meters);
@@ -58,6 +60,21 @@ class MicrometerGatewayMetricsTest {
         assertThat(meters.get("tripupdates.feed.read.failures").counter().count()).isEqualTo(1);
         assertThat(meters.get("tripupdates.feed.resyncs").counter().count()).isEqualTo(1);
         assertThat(meters.get("tripupdates.reconciliations").counter().count()).isEqualTo(1);
+    }
+
+    @Test
+    void deliveryLagPublishesHistogramBucketsButNoClientSidePercentiles() {
+        PrometheusMeterRegistry prometheus = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        MicrometerGatewayMetrics prometheusMetrics = new MicrometerGatewayMetrics(prometheus);
+        prometheusMetrics.eventDelivered(EventType.SOS, Duration.ofMillis(12));
+        prometheusMetrics.eventDelivered(EventType.SOS, Duration.ofMillis(800));
+
+        String scrape = prometheus.scrape();
+        assertThat(scrape).contains("tripupdates_delivery_lag_seconds_bucket{");
+        assertThat(scrape).contains("tripupdates_delivery_lag_seconds_count{type=\"SOS\"} 2");
+        assertThat(scrape).doesNotContain("quantile=");
+        assertThat(prometheus.get("tripupdates.delivery.lag").tag("type", "SOS").timer().takeSnapshot()
+                .percentileValues()).isEmpty();
     }
 
     @Test

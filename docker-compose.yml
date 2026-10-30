@@ -14,6 +14,20 @@ x-gateway: &gateway
   environment: &gateway-env
     APP_REDIS_URI: redis://redis:6379
     APP_AUTH_MODE: DEV
+    # Generated load-test fleet (DEV only): 2 tenants x 10 offices x 100 cabs = 2,000 cabs and trips, 4 passengers
+    # each. Must match the loadgen's LOADTEST_TENANTS / _OFFICES_PER_TENANT / _CABS_PER_OFFICE / _PASSENGERS_PER_TRIP.
+    APP_AUTH_SYNTHETICFLEET_TENANTS: 2
+    APP_AUTH_SYNTHETICFLEET_OFFICESPERTENANT: 10
+    APP_AUTH_SYNTHETICFLEET_CABSPEROFFICE: 100
+    APP_AUTH_SYNTHETICFLEET_PASSENGERSPERTRIP: 4
+    # Diagnostic: print a stack whenever a virtual thread blocks while pinned to its carrier (dev stack only).
+    JAVA_TOOL_OPTIONS: -Djdk.tracePinnedThreads=short
+  # Explicit limits: without them each JVM sizes its heap from the whole Docker VM (MaxRAMPercentage=75).
+  mem_limit: 1000m
+  ulimits:
+    nofile:
+      soft: 65536
+      hard: 65536
   depends_on:
     redis:
       condition: service_healthy
@@ -41,6 +55,7 @@ services:
       - noeviction
     ports:
       - "16379:6379"
+    mem_limit: 640m
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -79,6 +94,45 @@ services:
       - "8080:8080"
     volumes:
       - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      gateway-1:
+        condition: service_healthy
+      gateway-2:
+        condition: service_healthy
+      gateway-3:
+        condition: service_healthy
+
+  # Load generator (profile "loadtest": not started by a plain "docker compose up"). Runs the LoadTestMain of the
+  # gateway image on the Compose network, connecting straight to the replicas. Driven by deploy/loadtest/run-loadtest.ps1.
+  loadgen:
+    image: trip-updates-gateway:local
+    profiles: ["loadtest"]
+    entrypoint: ["java", "-XX:MaxRAMPercentage=75", "-Dloader.main=com.moveinsync.tripupdates.loadtest.LoadTestMain",
+                 "-cp", "/app/app.jar", "org.springframework.boot.loader.launch.PropertiesLauncher"]
+    environment:
+      LOADTEST_RUN_ID: ${LOADTEST_RUN_ID:-manual}
+      LOADTEST_RESULTS_DIR: /results
+      LOADTEST_GATEWAYS: ws://gateway-1:8080/ws,ws://gateway-2:8080/ws,ws://gateway-3:8080/ws
+      LOADTEST_REDIS_URI: redis://redis:6379
+      LOADTEST_TENANTS: 2
+      LOADTEST_OFFICES_PER_TENANT: 10
+      LOADTEST_CABS_PER_OFFICE: 100
+      LOADTEST_PASSENGERS_PER_TRIP: 4
+      LOADTEST_CLIENTS: ${LOADTEST_CLIENTS:-10000}
+      LOADTEST_CONNECTS_PER_SECOND: ${LOADTEST_CONNECTS_PER_SECOND:-400}
+      LOADTEST_WARMUP_S: ${LOADTEST_WARMUP_S:-15}
+      LOADTEST_DURATION_S: ${LOADTEST_DURATION_S:-180}
+      LOADTEST_DRAIN_S: ${LOADTEST_DRAIN_S:-30}
+      LOADTEST_LOCATION_INTERVAL_MS: ${LOADTEST_LOCATION_INTERVAL_MS:-5000}
+      LOADTEST_SOS_PER_SECOND: ${LOADTEST_SOS_PER_SECOND:-2}
+      LOADTEST_PUBLISHER_THREADS: ${LOADTEST_PUBLISHER_THREADS:-8}
+    volumes:
+      - ./loadtest-results:/results
+    mem_limit: 1600m
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     depends_on:
       gateway-1:
         condition: service_healthy

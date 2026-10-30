@@ -29,8 +29,21 @@ public record AppProperties(
         DEV
     }
 
-    /** {@code revalidateInterval}: how often live subscriptions are re-authorised (bounds permission staleness). */
-    public record Auth(@NotNull AuthMode mode, @NotNull Duration revalidateInterval) {
+    /**
+     * @param revalidateInterval how often live subscriptions are re-authorised (bounds permission staleness)
+     * @param syntheticFleet     DEV mode only: generated load-test fleet (all zero = disabled)
+     */
+    public record Auth(@NotNull AuthMode mode, @NotNull Duration revalidateInterval,
+            @Valid SyntheticFleet syntheticFleet) {
+    }
+
+    /** Dimensions of the generated development fleet (see {@code sim.SyntheticFleet}); all zero disables it. */
+    public record SyntheticFleet(@Min(0) int tenants, @Min(0) int officesPerTenant, @Min(0) int cabsPerOffice,
+            @Min(0) int passengersPerTrip) {
+
+        public boolean enabled() {
+            return tenants > 0 && officesPerTenant > 0 && cabsPerOffice > 0 && passengersPerTrip > 0;
+        }
     }
 
     /**

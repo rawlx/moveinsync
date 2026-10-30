@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 
 /**
@@ -28,8 +29,19 @@ public final class SubscriptionRegistry {
     private final int locationCapacity;
     private final GatewayMetrics metrics;
     private final ConcurrentHashMap<TenantTopic, TopicFeed> feeds = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<ClientSession, Map<TopicId, Subscription>> bySession = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<ClientSession, SessionSubscriptions> bySession = new ConcurrentHashMap<>();
     private final Set<ClientSession> sessions = ConcurrentHashMap.newKeySet();
+
+    /**
+     * One session's subscriptions. Changes are serialised by a {@link ReentrantLock}, not {@code synchronized}: the
+     * critical section takes a feed lock and may read Redis, and on Java 21 a virtual thread that blocks inside a
+     * {@code synchronized} block pins its carrier thread. Under many concurrent subscribes to the same topic that
+     * starved every carrier and hung the gateway (found by the 10k-connection load test).
+     */
+    private static final class SessionSubscriptions {
+        final ReentrantLock lock = new ReentrantLock();
+        final Map<TopicId, Subscription> topics = new ConcurrentHashMap<>();
+    }
 
     public SubscriptionRegistry(EventStore store, int pageSize, Executor feedExecutor, int reliableCapacity,
             int locationCapacity) {
@@ -84,16 +96,17 @@ public final class SubscriptionRegistry {
     public AttachOutcome attach(ClientSession session, TopicId topic, Long resumeAfter, int maxSubscriptions,
             Function<AttachOutcome.Attached, OutboundFrame.ControlMessage> confirmation) {
         TenantTopic key = new TenantTopic(session.tenantId(), topic);
-        Map<TopicId, Subscription> mine = bySession.computeIfAbsent(session, s -> new ConcurrentHashMap<>());
-        synchronized (mine) {
+        SessionSubscriptions mine = bySession.computeIfAbsent(session, s -> new SessionSubscriptions());
+        mine.lock.lock();
+        try {
             if (session.isClosed()) {
                 bySession.remove(session, mine);
                 throw new IllegalStateException("Session " + session.id() + " is closed");
             }
-            if (mine.containsKey(topic)) {
+            if (mine.topics.containsKey(topic)) {
                 return new AttachOutcome.AlreadySubscribed();
             }
-            if (mine.size() >= maxSubscriptions) {
+            if (mine.topics.size() >= maxSubscriptions) {
                 return new AttachOutcome.LimitReached(maxSubscriptions);
             }
             Subscription subscription = new Subscription(session, key);
@@ -114,19 +127,21 @@ public final class SubscriptionRegistry {
                     continue;
                 }
                 if (outcome instanceof AttachOutcome.Attached) {
-                    mine.put(topic, subscription);
+                    mine.topics.put(topic, subscription);
                 } else if (feed.retireIfEmpty()) {
                     feeds.remove(key, feed);
                 }
                 return outcome;
             }
+        } finally {
+            mine.lock.unlock();
         }
     }
 
     /** The session's subscription to a topic, or null. */
     public Subscription subscription(ClientSession session, TopicId topic) {
-        Map<TopicId, Subscription> mine = bySession.get(session);
-        return mine == null ? null : mine.get(topic);
+        SessionSubscriptions mine = bySession.get(session);
+        return mine == null ? null : mine.topics.get(topic);
     }
 
     /**
@@ -137,31 +152,37 @@ public final class SubscriptionRegistry {
      * @return true if the session was subscribed to the topic
      */
     public boolean unsubscribe(ClientSession session, TopicId topic) {
-        Map<TopicId, Subscription> mine = bySession.get(session);
+        SessionSubscriptions mine = bySession.get(session);
         if (mine == null) {
             return false;
         }
-        synchronized (mine) {
-            Subscription subscription = mine.remove(topic);
+        mine.lock.lock();
+        try {
+            Subscription subscription = mine.topics.remove(topic);
             if (subscription == null) {
                 return false;
             }
             detach(subscription);
             session.outbox().discardTopic(topic);
             return true;
+        } finally {
+            mine.lock.unlock();
         }
     }
 
     /** Removes every subscription of the session (called when it closes). */
     public void removeAll(ClientSession session) {
         sessions.remove(session);
-        Map<TopicId, Subscription> mine = bySession.remove(session);
+        SessionSubscriptions mine = bySession.remove(session);
         if (mine == null) {
             return;
         }
-        synchronized (mine) {
-            mine.values().forEach(this::detach);
-            mine.clear();
+        mine.lock.lock();
+        try {
+            mine.topics.values().forEach(this::detach);
+            mine.topics.clear();
+        } finally {
+            mine.lock.unlock();
         }
     }
 
@@ -180,8 +201,8 @@ public final class SubscriptionRegistry {
     }
 
     public List<TopicId> topicsOf(ClientSession session) {
-        Map<TopicId, Subscription> mine = bySession.get(session);
-        return mine == null ? List.of() : List.copyOf(mine.keySet());
+        SessionSubscriptions mine = bySession.get(session);
+        return mine == null ? List.of() : List.copyOf(mine.topics.keySet());
     }
 
     private void detach(Subscription subscription) {

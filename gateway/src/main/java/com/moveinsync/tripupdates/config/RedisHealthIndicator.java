@@ -3,6 +3,7 @@ package com.moveinsync.tripupdates.config;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisException;
 import io.lettuce.core.api.StatefulRedisConnection;
+import java.util.concurrent.locks.ReentrantLock;
 import org.springframework.boot.actuate.health.Health;
 import org.springframework.boot.actuate.health.HealthIndicator;
 
@@ -14,6 +15,7 @@ import org.springframework.boot.actuate.health.HealthIndicator;
 final class RedisHealthIndicator implements HealthIndicator, AutoCloseable {
 
     private final RedisClient client;
+    private final ReentrantLock connectLock = new ReentrantLock();
     private volatile StatefulRedisConnection<String, String> connection;
 
     RedisHealthIndicator(RedisClient client) {
@@ -37,10 +39,15 @@ final class RedisHealthIndicator implements HealthIndicator, AutoCloseable {
         }
     }
 
-    private synchronized StatefulRedisConnection<String, String> connection() {
-        if (connection == null) {
-            connection = client.connect();
+    private StatefulRedisConnection<String, String> connection() {
+        connectLock.lock(); // not synchronized: connecting blocks, which would pin a virtual thread
+        try {
+            if (connection == null) {
+                connection = client.connect();
+            }
+            return connection;
+        } finally {
+            connectLock.unlock();
         }
-        return connection;
     }
 }
